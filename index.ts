@@ -53,66 +53,16 @@ interface GenerateRequestBody {
   pitch?: number;
 }
 
-app.post(
-  ["/generate", "/api/generate"],
-  async (req: Request<unknown, unknown, GenerateRequestBody>, res: Response) => {
-  try {
-    if (!ELEVENLABS_API_KEY) {
-      return res.status(500).json({ error: "ELEVENLABS_API_KEY is not set" });
-    }
-
-    const { text, voiceId, speed, pitch } = req.body;
-
-    if (!text || !voiceId) {
-      return res.status(400).json({ error: "text and voiceId are required" });
-    }
-
-    if (text.length > 1000) {
-      return res.status(400).json({ error: "Text must be 1000 characters or less" });
-    }
-
-    await fs.mkdir(TEMP_DIR, { recursive: true });
-
-    const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
-      method: "POST",
-      headers: {
-        "xi-api-key": ELEVENLABS_API_KEY,
-        "Content-Type": "application/json",
-        Accept: "audio/mpeg"
-      },
-      body: JSON.stringify({
-        text,
-        model_id: "eleven_multilingual_v2",
-        voice_settings: {
-          speed: typeof speed === "number" ? speed : 1,
-          pitch: typeof pitch === "number" ? pitch : 1
-        }
-      })
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      return res.status(response.status).json({
-        error: "Failed to generate audio",
-        details: errorText
-      });
-    }
-
-    const audioBuffer = Buffer.from(await response.arrayBuffer());
-    const fileName = `voice_${Date.now()}.mp3`;
-    const filePath = path.join(TEMP_DIR, fileName);
-
-    await fs.writeFile(filePath, audioBuffer);
-
-    return res.json({ url: `/temp/${fileName}` });
-  } catch (error) {
-    return res.status(500).json({
-      error: "Unexpected error while generating audio",
-      details: error instanceof Error ? error.message : "Unknown error"
-    });
-  }
-  }
-);
+app.post('/api/generate', async (req, res) => {
+  console.log('📥 Received generate request:', req.body);
+  
+  // Простейшая заглушка — возвращаем ссылку на тестовое аудио
+  // Если вы услышите эту мелодию, значит связь работает
+  return res.json({
+      audioUrl: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3',
+      status: 'completed'
+  });
+});
 
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
