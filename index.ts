@@ -64,7 +64,7 @@ app.post("/api/generate", async (req: Request, res: Response) => {
             },
             body: JSON.stringify({
                 text: text,
-                model_id: "eleven_monolingual_v1",
+                model_id: "eleven_turbo_v2",
                 voice_settings: {
                     stability: 0.7,
                     similarity_boost: 0.7,
