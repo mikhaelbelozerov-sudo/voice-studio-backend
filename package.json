@@ -20,7 +20,6 @@
     "@types/uuid": "^10.0.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
-    "elevenlabs-node": "^2.0.3",
     "express": "^5.2.1",
     "ts-node": "^10.9.2",
     "typescript": "^6.0.3",
