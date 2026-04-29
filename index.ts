@@ -3,6 +3,7 @@ import dotenv from "dotenv";
 import express, { Request, Response } from "express";
 import fs from "fs";
 import path from "path";
+import { getOrCreateUser, canGenerate, consumeGeneration, saveGenerationHistory } from './quotaService';
 
 dotenv.config();
 
@@ -47,20 +48,29 @@ app.get(["/voices", "/api/voices"], async (_req: Request, res: Response) => {
 // Генерация аудио (прямой API, без дополнительных пакетов)
 app.post("/api/generate", async (req: Request, res: Response) => {
     try {
-        const { text, voiceId, speed = 1.0, pitch = 0 } = req.body;
+        const { text, voiceId, speed = 1.0, pitch = 0, telegramId } = req.body;
+
+        // Проверка обязательных полей
         if (!text || !voiceId) {
             return res.status(400).json({ error: "Missing text or voiceId" });
         }
-        if (text.length > 1000) {
-            return res.status(400).json({ error: "Text too long (max 1000 chars)" });
+        if (!telegramId) {
+            return res.status(400).json({ error: "Missing telegramId. Please login." });
         }
 
-        // Вызов ElevenLabs API
+        // Проверка квоты
+        const canGen = await canGenerate(telegramId);
+        if (!canGen) {
+            return res.status(403).json({ error: "Daily limit reached. Upgrade to Pro for unlimited generations." });
+        }
+
+        // Генерация аудио через ElevenLabs (как у вас уже реализовано)
+        const apiKey = process.env.ELEVENLABS_API_KEY;
         const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
-                "xi-api-key": ELEVENLABS_API_KEY!
+                "xi-api-key": apiKey!
             },
             body: JSON.stringify({
                 text: text,
@@ -79,15 +89,20 @@ app.post("/api/generate", async (req: Request, res: Response) => {
             throw new Error(`ElevenLabs error (${response.status}): ${errorText}`);
         }
 
-        // Получаем аудио как Buffer
         const arrayBuffer = await response.arrayBuffer();
         const buffer = Buffer.from(arrayBuffer);
-        const filename = `generated_${Date.now()}.mp3`;
+        const filename = `audio_${Date.now()}.mp3`;
         const filePath = path.join(TEMP_DIR, filename);
-        await fs.promises.writeFile(filePath, buffer);
+        fs.writeFileSync(filePath, buffer);
 
-        const baseUrl = `${req.protocol}://${req.get("host")}`;
-        const audioUrl = `${baseUrl}/temp/${filename}`;
+        const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+        const host = req.get('host');
+        const audioUrl = `${protocol}://${host}/temp/${filename}`;
+
+        // Списать квоту и сохранить историю
+        await consumeGeneration(telegramId);
+        await saveGenerationHistory(telegramId, text, voiceId, audioUrl);
+
         res.json({ audioUrl, status: "completed" });
     } catch (err: any) {
         console.error("Generation error:", err);
