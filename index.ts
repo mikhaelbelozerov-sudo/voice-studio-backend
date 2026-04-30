@@ -3,7 +3,7 @@ import dotenv from "dotenv";
 import express, { Request, Response } from "express";
 import fs from "fs";
 import path from "path";
-import { getOrCreateUser, canGenerate, consumeGeneration, saveGenerationHistory } from './quotaService';
+import { getOrCreateUser, canGenerate, consumeGeneration, saveGenerationHistory, cleanExpiredFiles } from './quotaService';
 
 dotenv.config();
 
@@ -109,6 +109,30 @@ app.post("/api/generate", async (req: Request, res: Response) => {
         res.status(500).json({ error: err.message });
     }
 });
+
+const CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+const runExpiredFilesCleanup = async () => {
+    try {
+        console.log("🧹 Running expired files cleanup...");
+        const removedCount = await cleanExpiredFiles(TEMP_DIR);
+        console.log(`🧹 Cleanup completed. Removed files: ${removedCount}`);
+    } catch (error) {
+        console.error("❌ Expired files cleanup failed:", error);
+    }
+};
+
+// Первичная очистка при старте
+runExpiredFilesCleanup().catch((error) => {
+    console.error("❌ Initial cleanup execution failed:", error);
+});
+
+// Периодическая очистка каждые 6 часов
+setInterval(() => {
+    runExpiredFilesCleanup().catch((error) => {
+        console.error("❌ Scheduled cleanup execution failed:", error);
+    });
+}, CLEANUP_INTERVAL_MS);
 
 app.listen(PORT, () => {
     console.log(`✅ Server running on http://localhost:${PORT}`);
