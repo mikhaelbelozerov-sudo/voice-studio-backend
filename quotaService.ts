@@ -105,6 +105,37 @@ export async function saveGenerationHistory(
   if (error) console.error('Failed to save generation:', error);
 }
 
+export type GenerationHistoryItem = {
+  id: number | string;
+  text: string | null;
+  voice_id: string | null;
+  audio_url: string | null;
+  created_at: string;
+  file_deleted: boolean | null;
+};
+
+export async function getUserGenerations(
+  telegramId: number,
+  limit = 20,
+  offset = 0
+): Promise<GenerationHistoryItem[]> {
+  const safeLimit = Math.min(Math.max(Number(limit) || 20, 1), 50);
+  const safeOffset = Math.max(Number(offset) || 0, 0);
+
+  const { data, error } = await supabase
+    .from('generations')
+    .select('id, text, voice_id, audio_url, created_at, file_deleted')
+    .eq('user_telegram_id', telegramId)
+    .order('created_at', { ascending: false })
+    .range(safeOffset, safeOffset + safeLimit - 1);
+
+  if (error) {
+    throw new Error(`Generations fetch error: ${error.message}`);
+  }
+
+  return (data ?? []) as GenerationHistoryItem[];
+}
+
 type GenerationWithUserTier = {
   id: number | string;
   audio_url: string | null;

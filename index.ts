@@ -3,7 +3,13 @@ import dotenv from "dotenv";
 import express, { Request, Response } from "express";
 import fs from "fs";
 import path from "path";
-import { getOrCreateUser, canGenerate, consumeGeneration, saveGenerationHistory, cleanExpiredFiles } from './quotaService';
+import {
+    canGenerate,
+    cleanExpiredFiles,
+    consumeGeneration,
+    getUserGenerations,
+    saveGenerationHistory
+} from './quotaService';
 
 dotenv.config();
 
@@ -107,6 +113,24 @@ app.post("/api/generate", async (req: Request, res: Response) => {
     } catch (err: any) {
         console.error("Generation error:", err);
         res.status(500).json({ error: err.message });
+    }
+});
+
+app.get("/api/generations", async (req: Request, res: Response) => {
+    try {
+        const telegramId = Number(req.query.telegramId);
+        const limit = Number(req.query.limit ?? 20);
+        const offset = Number(req.query.offset ?? 0);
+
+        if (!Number.isFinite(telegramId) || telegramId <= 0) {
+            return res.status(400).json({ error: "Invalid or missing telegramId" });
+        }
+
+        const generations = await getUserGenerations(telegramId, limit, offset);
+        return res.json(generations);
+    } catch (err: any) {
+        console.error("Generations fetch error:", err);
+        return res.status(500).json({ error: err.message ?? "Failed to fetch generations" });
     }
 });
 
