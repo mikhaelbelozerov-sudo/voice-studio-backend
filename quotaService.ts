@@ -114,6 +114,27 @@ export type GenerationHistoryItem = {
   file_deleted: boolean | null;
 };
 
+export type SubscriptionTier = 'free' | 'pro' | 'premium';
+
+export async function getUserSubscriptionTier(telegramId: number): Promise<SubscriptionTier> {
+  const { data, error } = await supabase
+    .from('users')
+    .select('subscription_tier')
+    .eq('telegram_id', telegramId)
+    .single();
+
+  if (error && error.code !== 'PGRST116') {
+    throw new Error(`User tier fetch error: ${error.message}`);
+  }
+
+  const tier = data?.subscription_tier;
+  if (tier === 'pro' || tier === 'premium') {
+    return tier;
+  }
+
+  return 'free';
+}
+
 export async function getUserGenerations(
   telegramId: number,
   limit = 20,

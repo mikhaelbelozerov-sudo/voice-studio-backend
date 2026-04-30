@@ -8,6 +8,7 @@ import {
     cleanExpiredFiles,
     consumeGeneration,
     getUserGenerations,
+    getUserSubscriptionTier,
     saveGenerationHistory
 } from './quotaService';
 
@@ -126,8 +127,15 @@ app.get("/api/generations", async (req: Request, res: Response) => {
             return res.status(400).json({ error: "Invalid or missing telegramId" });
         }
 
-        const generations = await getUserGenerations(telegramId, limit, offset);
-        return res.json(generations);
+        const [generations, userTier] = await Promise.all([
+            getUserGenerations(telegramId, limit, offset),
+            getUserSubscriptionTier(telegramId)
+        ]);
+
+        return res.json({
+            generations,
+            userTier
+        });
     } catch (err: any) {
         console.error("Generations fetch error:", err);
         return res.status(500).json({ error: err.message ?? "Failed to fetch generations" });
