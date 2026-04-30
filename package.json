@@ -22,8 +22,12 @@
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "node-telegram-bot-api": "^0.67.0",
     "ts-node": "^10.9.2",
     "typescript": "^6.0.3",
     "uuid": "^14.0.0"
+  },
+  "devDependencies": {
+    "@types/node-telegram-bot-api": "^0.64.14"
   }
 }

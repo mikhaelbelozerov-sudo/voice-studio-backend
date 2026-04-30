@@ -2,21 +2,26 @@ import cors from "cors";
 import dotenv from "dotenv";
 import express, { Request, Response } from "express";
 import fs from "fs";
+import TelegramBot from "node-telegram-bot-api";
 import path from "path";
 import {
     canGenerate,
     cleanExpiredFiles,
     consumeGeneration,
     getUserGenerations,
+    getUserProfile,
     getUserSubscriptionTier,
+    getOrCreateUser,
     saveGenerationHistory
 } from './quotaService';
+import { supabase } from "./quotaService";
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TEMP_DIR = path.join(__dirname, "temp");
 
 // Проверка ключа ElevenLabs
@@ -33,6 +38,230 @@ if (!fs.existsSync(TEMP_DIR)) {
 app.use(cors());
 app.use(express.json());
 app.use("/temp", express.static(TEMP_DIR));
+
+type ProductType = "minutes" | "subscription";
+type ProductConfig = {
+    productType: ProductType;
+    productValue: number;
+    amount: number;
+    title: string;
+    description: string;
+    label: string;
+};
+
+const PRODUCT_CATALOG: Record<string, ProductConfig> = {
+    "minutes_100": {
+        productType: "minutes",
+        productValue: 100,
+        amount: 50,
+        title: "100 минут VoiceStudio",
+        description: "Пакет из 100 дополнительных минут генерации",
+        label: "100 минут"
+    },
+    "pro_30d": {
+        productType: "subscription",
+        productValue: 1,
+        amount: 100,
+        title: "Pro подписка на 30 дней",
+        description: "Безлимитная генерация + хранение файлов до 30 дней",
+        label: "Pro 30 дней"
+    },
+    "premium_30d": {
+        productType: "subscription",
+        productValue: 2,
+        amount: 200,
+        title: "Premium подписка на 30 дней",
+        description: "Максимальный тариф и бессрочное хранение файлов",
+        label: "Premium 30 дней"
+    }
+};
+
+const addDaysToDate = (baseDate: Date, days: number) => {
+    const nextDate = new Date(baseDate);
+    nextDate.setDate(nextDate.getDate() + days);
+    return nextDate;
+};
+
+const getBot = () => {
+    if (!TELEGRAM_BOT_TOKEN) {
+        return null;
+    }
+    return new TelegramBot(TELEGRAM_BOT_TOKEN, { webHook: true });
+};
+
+const telegramBot = getBot();
+
+if (!telegramBot) {
+    console.warn("⚠️ TELEGRAM_BOT_TOKEN is not set. Telegram payments are disabled.");
+} else {
+    telegramBot.onText(/^\/buy/i, async (msg: TelegramBot.Message) => {
+        const chatId = msg.chat.id;
+        try {
+            await telegramBot.sendMessage(chatId, "Выберите продукт для оплаты Telegram Stars:", {
+                reply_markup: {
+                    inline_keyboard: [
+                        [{ text: "100 минут = 50 ⭐️", callback_data: "buy:minutes_100" }],
+                        [{ text: "Pro 30 дней = 100 ⭐️", callback_data: "buy:pro_30d" }],
+                        [{ text: "Premium 30 дней = 200 ⭐️", callback_data: "buy:premium_30d" }]
+                    ]
+                }
+            });
+        } catch (error) {
+            console.error("Failed to send /buy options:", error);
+        }
+    });
+
+    telegramBot.on("callback_query", async (query: TelegramBot.CallbackQuery) => {
+        const telegramId = query.from.id;
+        const chatId = query.message?.chat.id;
+        const action = query.data;
+        if (!action?.startsWith("buy:") || !chatId) {
+            await telegramBot.answerCallbackQuery(query.id);
+            return;
+        }
+
+        const productKey = action.replace("buy:", "");
+        const product = PRODUCT_CATALOG[productKey];
+        if (!product) {
+            await telegramBot.answerCallbackQuery(query.id, { text: "Неизвестный товар", show_alert: true });
+            return;
+        }
+
+        const payload = `inv_${Date.now()}_${telegramId}_${productKey}`;
+        try {
+            const { error } = await supabase.from("stars_invoices").insert([{
+                id: payload,
+                telegram_id: telegramId,
+                amount: product.amount,
+                product_type: product.productType,
+                product_value: product.productValue,
+                status: "pending"
+            }]);
+            if (error) {
+                throw error;
+            }
+
+            await telegramBot.sendInvoice(
+                chatId,
+                product.title,
+                product.description,
+                payload,
+                "",
+                "XTR",
+                [{ label: product.label, amount: product.amount }]
+            );
+
+            await telegramBot.answerCallbackQuery(query.id, { text: "Счёт отправлен в чат" });
+        } catch (error) {
+            console.error("Failed to create invoice:", error);
+            await telegramBot.answerCallbackQuery(query.id, {
+                text: "Не удалось создать счёт. Попробуйте позже.",
+                show_alert: true
+            });
+        }
+    });
+
+    telegramBot.on("pre_checkout_query", async (preCheckoutQuery: TelegramBot.PreCheckoutQuery) => {
+        try {
+            const payload = preCheckoutQuery.invoice_payload;
+            const { data, error } = await supabase
+                .from("stars_invoices")
+                .select("id, status")
+                .eq("id", payload)
+                .single();
+
+            const isValid = !error && data && data.status !== "paid";
+            await telegramBot.answerPreCheckoutQuery(preCheckoutQuery.id, isValid, {
+                error_message: isValid ? undefined : "Счёт недействителен или уже оплачен."
+            });
+        } catch (error) {
+            console.error("Pre-checkout validation failed:", error);
+            await telegramBot.answerPreCheckoutQuery(preCheckoutQuery.id, false, {
+                error_message: "Ошибка проверки платежа. Повторите попытку."
+            });
+        }
+    });
+
+    telegramBot.on("message", async (msg: TelegramBot.Message) => {
+        if (!msg.successful_payment) {
+            return;
+        }
+
+        const payment = msg.successful_payment;
+        const payload = payment.invoice_payload;
+        const telegramId = msg.from?.id;
+
+        if (!telegramId) {
+            return;
+        }
+
+        try {
+            const { data: invoice, error: invoiceError } = await supabase
+                .from("stars_invoices")
+                .select("id, telegram_id, amount, product_type, product_value, status")
+                .eq("id", payload)
+                .single();
+
+            if (invoiceError || !invoice || invoice.status === "paid") {
+                throw new Error("Invoice not found or already paid");
+            }
+
+            await supabase
+                .from("stars_invoices")
+                .update({ status: "paid" })
+                .eq("id", payload);
+
+            await supabase.from("payments").insert([{
+                telegram_payment_charge_id: payment.telegram_payment_charge_id,
+                invoice_id: payload,
+                amount: payment.total_amount
+            }]);
+
+            const user = await getOrCreateUser(telegramId);
+
+            if (invoice.product_type === "minutes") {
+                const nextMinutes = (user.stars_minutes ?? 0) + Number(invoice.product_value);
+                await supabase
+                    .from("users")
+                    .update({ stars_minutes: nextMinutes })
+                    .eq("telegram_id", telegramId);
+            } else if (invoice.product_type === "subscription") {
+                const nextTier = Number(invoice.product_value) === 2 ? "premium" : "pro";
+                const currentExpiry = user.subscription_expires_at ? new Date(user.subscription_expires_at) : null;
+                const now = new Date();
+                const startDate = currentExpiry && currentExpiry.getTime() > now.getTime() ? currentExpiry : now;
+                const nextExpiry = addDaysToDate(startDate, 30);
+
+                await supabase
+                    .from("users")
+                    .update({
+                        subscription_tier: nextTier,
+                        subscription_expires_at: nextExpiry.toISOString()
+                    })
+                    .eq("telegram_id", telegramId);
+            }
+
+            await telegramBot.sendMessage(msg.chat.id, "Оплата прошла успешно! Доступ обновлён.");
+        } catch (error) {
+            console.error("Failed to process successful payment:", error);
+            await telegramBot.sendMessage(msg.chat.id, "Платёж получен, но произошла ошибка обработки. Поддержка уже уведомлена.");
+        }
+    });
+}
+
+app.post("/webhook/bot", async (req: Request, res: Response) => {
+    if (!telegramBot) {
+        return res.status(503).json({ error: "Telegram bot is not configured" });
+    }
+
+    try {
+        telegramBot.processUpdate(req.body);
+        return res.sendStatus(200);
+    } catch (error: any) {
+        console.error("Webhook processing error:", error);
+        return res.status(500).json({ error: error.message ?? "Webhook processing failed" });
+    }
+});
 
 // Получение списка голосов
 app.get(["/voices", "/api/voices"], async (_req: Request, res: Response) => {
@@ -139,6 +368,21 @@ app.get("/api/generations", async (req: Request, res: Response) => {
     } catch (err: any) {
         console.error("Generations fetch error:", err);
         return res.status(500).json({ error: err.message ?? "Failed to fetch generations" });
+    }
+});
+
+app.get("/api/user/profile", async (req: Request, res: Response) => {
+    try {
+        const telegramId = Number(req.query.telegramId);
+        if (!Number.isFinite(telegramId) || telegramId <= 0) {
+            return res.status(400).json({ error: "Invalid or missing telegramId" });
+        }
+
+        const profile = await getUserProfile(telegramId);
+        return res.json(profile);
+    } catch (err: any) {
+        console.error("Profile fetch error:", err);
+        return res.status(500).json({ error: err.message ?? "Failed to fetch profile" });
     }
 });
 

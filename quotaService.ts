@@ -6,12 +6,21 @@ import path from 'path';
 const SUPABASE_URL = 'https://dhubdhpkugfvqgklxzdl.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_Vm5NiZck3MROCzf1YJXVAw_g8ngEcLE';
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+export type UserRecord = {
+  telegram_id: number;
+  subscription_tier: 'free' | 'pro' | 'premium';
+  subscription_expires_at: string | null;
+  stars_minutes: number;
+  daily_minutes_used: number;
+  last_reset_date: string;
+};
 
 /**
  * Получить или создать пользователя в БД по telegramId
  */
-export async function getOrCreateUser(telegramId: number, firstName?: string, username?: string) {
+export async function getOrCreateUser(telegramId: number, firstName?: string, username?: string): Promise<UserRecord> {
   // Проверяем, есть ли уже такой пользователь
   const { data: existing, error: fetchError } = await supabase
     .from('users')
@@ -35,7 +44,12 @@ export async function getOrCreateUser(telegramId: number, firstName?: string, us
       existing.daily_minutes_used = 0;
       existing.last_reset_date = today;
     }
-    return existing;
+    return {
+      ...existing,
+      stars_minutes: existing.stars_minutes ?? 0,
+      subscription_tier: existing.subscription_tier ?? 'free',
+      subscription_expires_at: existing.subscription_expires_at ?? null
+    } as UserRecord;
   }
 
   // Создаём нового пользователя
@@ -47,13 +61,20 @@ export async function getOrCreateUser(telegramId: number, firstName?: string, us
       username: username || '',
       subscription_tier: 'free',
       daily_minutes_used: 0,
-      last_reset_date: new Date().toISOString().slice(0,10)
+      last_reset_date: new Date().toISOString().slice(0,10),
+      stars_minutes: 0,
+      subscription_expires_at: null
     }])
     .select()
     .single();
 
   if (insertError) throw insertError;
-  return newUser;
+  return {
+    ...newUser,
+    stars_minutes: newUser.stars_minutes ?? 0,
+    subscription_tier: newUser.subscription_tier ?? 'free',
+    subscription_expires_at: newUser.subscription_expires_at ?? null
+  } as UserRecord;
 }
 
 /**
@@ -61,13 +82,27 @@ export async function getOrCreateUser(telegramId: number, firstName?: string, us
  * Для free тарифа — 3 минуты в день (или 3 генерации, зависит от того, что вы хотите)
  * Здесь считаем по количеству генераций (1 генерация = 1 минута, упрощённо)
  */
-export async function canGenerate(telegramId: number): Promise<boolean> {
-  const user = await getOrCreateUser(telegramId);
-  if (user.subscription_tier === 'pro') {
-    // Для pro-пользователей лимита нет (или очень большой)
+export function isSubscriptionActive(user: Pick<UserRecord, 'subscription_tier' | 'subscription_expires_at'>): boolean {
+  if (user.subscription_tier === 'premium') {
     return true;
   }
-  // free: не более 3 генераций в день
+  if (user.subscription_tier !== 'pro' || !user.subscription_expires_at) {
+    return false;
+  }
+  return new Date(user.subscription_expires_at).getTime() > Date.now();
+}
+
+export async function canGenerate(telegramId: number): Promise<boolean> {
+  const user = await getOrCreateUser(telegramId);
+
+  if (isSubscriptionActive(user)) {
+    return true;
+  }
+
+  if ((user.stars_minutes ?? 0) > 0) {
+    return true;
+  }
+
   return user.daily_minutes_used < 3;
 }
 
@@ -76,11 +111,27 @@ export async function canGenerate(telegramId: number): Promise<boolean> {
  */
 export async function consumeGeneration(telegramId: number) {
   const user = await getOrCreateUser(telegramId);
-  const newCount = user.daily_minutes_used + 1;
-  const { error } = await supabase
-    .from('users')
-    .update({ daily_minutes_used: newCount })
-    .eq('telegram_id', telegramId);
+
+  if (isSubscriptionActive(user)) {
+    return;
+  }
+
+  let error = null;
+  if ((user.stars_minutes ?? 0) > 0) {
+    const result = await supabase
+      .from('users')
+      .update({ stars_minutes: Math.max((user.stars_minutes ?? 0) - 1, 0) })
+      .eq('telegram_id', telegramId);
+    error = result.error;
+  } else {
+    const newCount = user.daily_minutes_used + 1;
+    const result = await supabase
+      .from('users')
+      .update({ daily_minutes_used: newCount })
+      .eq('telegram_id', telegramId);
+    error = result.error;
+  }
+
   if (error) throw error;
 }
 
@@ -116,6 +167,12 @@ export type GenerationHistoryItem = {
 
 export type SubscriptionTier = 'free' | 'pro' | 'premium';
 
+export type UserProfile = {
+  subscription_tier: SubscriptionTier;
+  subscription_expires_at: string | null;
+  stars_minutes: number;
+};
+
 export async function getUserSubscriptionTier(telegramId: number): Promise<SubscriptionTier> {
   const { data, error } = await supabase
     .from('users')
@@ -133,6 +190,15 @@ export async function getUserSubscriptionTier(telegramId: number): Promise<Subsc
   }
 
   return 'free';
+}
+
+export async function getUserProfile(telegramId: number): Promise<UserProfile> {
+  const user = await getOrCreateUser(telegramId);
+  return {
+    subscription_tier: user.subscription_tier ?? 'free',
+    subscription_expires_at: user.subscription_expires_at ?? null,
+    stars_minutes: user.stars_minutes ?? 0
+  };
 }
 
 export async function getUserGenerations(
