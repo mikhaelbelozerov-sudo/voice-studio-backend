@@ -397,9 +397,11 @@ app.post("/api/generate", async (req: Request, res: Response) => {
         const safeSpeed = Number.isFinite(parsedSpeed) ? Math.min(Math.max(parsedSpeed, 0.5), 2.0) : 1.0;
         const safePitch = Number.isFinite(parsedPitch) ? Math.min(Math.max(parsedPitch, -1.0), 1.0) : 0;
 
-        console.log("🎛️ Voice settings:", {
+        console.log("🎛️ Voice settings received:", {
             telegramId,
             voiceId,
+            rawSpeed: speed,
+            rawPitch: pitch,
             speed: safeSpeed,
             pitch: safePitch
         });
@@ -432,6 +434,14 @@ app.post("/api/generate", async (req: Request, res: Response) => {
 
         if (!response.ok) {
             const errorText = await response.text();
+            console.error("❌ ElevenLabs generation failed", {
+                status: response.status,
+                voiceId,
+                telegramId,
+                speed: safeSpeed,
+                pitch: safePitch,
+                errorText
+            });
             throw new Error(`ElevenLabs error (${response.status}): ${errorText}`);
         }
 
@@ -451,7 +461,10 @@ app.post("/api/generate", async (req: Request, res: Response) => {
 
         res.json({ audioUrl, status: "completed" });
     } catch (err: any) {
-        console.error("Generation error:", err);
+        console.error("Generation error:", {
+            message: err?.message,
+            stack: err?.stack
+        });
         res.status(500).json({ error: err.message });
     }
 });

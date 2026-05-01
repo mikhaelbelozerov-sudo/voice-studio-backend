@@ -242,11 +242,17 @@ type GenerationWithUserTier = {
  */
 export async function cleanExpiredFiles(tempDir: string): Promise<number> {
   try {
-      // 1. Получаем все записи из generations, у которых есть audio_url
+      if (!fs.existsSync(tempDir)) {
+          console.warn(`⚠️ Cleanup skipped: temp directory does not exist (${tempDir})`);
+          return 0;
+      }
+
+      // 1) Берем только те генерации, у которых еще не проставлен file_deleted=true
       const { data: generations, error: genError } = await supabase
           .from('generations')
-          .select('id, user_telegram_id, audio_url, created_at')
-          .not('audio_url', 'is', null);
+          .select('id, user_telegram_id, audio_url, created_at, file_deleted')
+          .not('audio_url', 'is', null)
+          .not('file_deleted', 'is', true);
 
       if (genError) {
           console.error('Failed to fetch generations for cleanup:', genError);
@@ -254,14 +260,11 @@ export async function cleanExpiredFiles(tempDir: string): Promise<number> {
       }
 
       if (!generations || generations.length === 0) {
-          console.log('Нет записей для проверки');
+          console.log('🧹 Cleanup: no generation records to process');
           return 0;
       }
 
-      // 2. Получаем уникальные telegram_id пользователей
       const uniqueUserIds = [...new Set(generations.map(g => g.user_telegram_id))];
-      
-      // 3. Запрашиваем тарифы для этих пользователей
       const { data: users, error: usersError } = await supabase
           .from('users')
           .select('telegram_id, subscription_tier')
@@ -272,48 +275,74 @@ export async function cleanExpiredFiles(tempDir: string): Promise<number> {
           return 0;
       }
 
-      // Создаём map: telegram_id -> subscription_tier
-      const userTierMap = new Map();
-      users?.forEach(u => userTierMap.set(u.telegram_id, u.subscription_tier));
+      const userTierMap = new Map<number, string>();
+      users?.forEach((u) => userTierMap.set(u.telegram_id, u.subscription_tier ?? 'free'));
+
+      const missingUsers = uniqueUserIds.filter((id) => !userTierMap.has(id));
+      if (missingUsers.length > 0) {
+          console.warn('⚠️ Cleanup: users not found for telegram_id, defaulting to free:', missingUsers);
+      }
 
       const now = Date.now();
       let deletedCount = 0;
+      let markedDeletedWithoutFile = 0;
 
       for (const gen of generations) {
-          const tier = userTierMap.get(gen.user_telegram_id) || 'free';
-          let maxAgeHours = null;
-          if (tier === 'free') maxAgeHours = 24;
-          else if (tier === 'pro') maxAgeHours = 30 * 24; // 720 часов
-          // premium – null, никогда не удаляем
+          const tierRaw = userTierMap.get(gen.user_telegram_id);
+          const tier = tierRaw === 'premium' || tierRaw === 'pro' || tierRaw === 'free' ? tierRaw : 'free';
+          const maxAgeHours = tier === 'premium' ? null : (tier === 'pro' ? 30 * 24 : 24);
 
-          if (maxAgeHours !== null) {
-              const createdTime = new Date(gen.created_at).getTime();
-              const ageHours = (now - createdTime) / (1000 * 60 * 60);
-              if (ageHours > maxAgeHours) {
-                  // Извлекаем имя файла из audio_url
-                  const filename = gen.audio_url.split('/').pop();
-                  if (filename) {
-                      const filePath = path.join(tempDir, filename);
-                      try {
-                          if (fs.existsSync(filePath)) {
-                              fs.unlinkSync(filePath);
-                              deletedCount++;
-                              console.log(`🗑️ Удалён файл: ${filename} (пользователь ${gen.user_telegram_id}, тариф ${tier}, возраст ${Math.round(ageHours)} ч.)`);
-                              
-                              // Обновляем запись в generations – помечаем файл удалённым
-                              await supabase
-                                  .from('generations')
-                                  .update({ file_deleted: true })
-                                  .eq('id', gen.id);
-                          }
-                      } catch (err) {
-                          console.error(`Ошибка удаления файла ${filename}:`, err);
-                      }
-                  }
+          const createdTime = new Date(gen.created_at).getTime();
+          const ageHours = Number.isFinite(createdTime) ? (now - createdTime) / (1000 * 60 * 60) : Number.NaN;
+          const shouldDelete = maxAgeHours !== null && Number.isFinite(ageHours) && ageHours > maxAgeHours;
+
+          console.log('🧾 Cleanup item:', {
+              generationId: gen.id,
+              telegramId: gen.user_telegram_id,
+              createdAt: gen.created_at,
+              tier,
+              ageHours: Number.isFinite(ageHours) ? Number(ageHours.toFixed(2)) : 'invalid_date',
+              maxAgeHours,
+              shouldDelete
+          });
+
+          if (!shouldDelete) {
+              continue;
+          }
+
+          const filename = gen.audio_url?.split('/').pop();
+          if (!filename) {
+              console.warn(`⚠️ Cleanup: cannot parse filename for generation ${gen.id}, marking as deleted in DB`);
+              await supabase.from('generations').update({ file_deleted: true }).eq('id', gen.id);
+              markedDeletedWithoutFile++;
+              continue;
+          }
+
+          const filePath = path.join(tempDir, filename);
+          try {
+              if (fs.existsSync(filePath)) {
+                  fs.unlinkSync(filePath);
+                  deletedCount++;
+                  console.log(`🗑️ File deleted: ${filename} (generation ${gen.id})`);
+              } else {
+                  console.warn(`⚠️ File already missing: ${filename} (generation ${gen.id}), syncing DB flag`);
+                  markedDeletedWithoutFile++;
               }
+
+              const { error: updateError } = await supabase
+                  .from('generations')
+                  .update({ file_deleted: true })
+                  .eq('id', gen.id);
+
+              if (updateError) {
+                  console.error(`Failed to update file_deleted for generation ${gen.id}:`, updateError);
+              }
+          } catch (err) {
+              console.error(`Error deleting file for generation ${gen.id} (${filename}):`, err);
           }
       }
-      console.log(`🧹 Cleanup completed. Removed files: ${deletedCount}`);
+
+      console.log(`🧹 Cleanup completed. Removed files: ${deletedCount}, marked deleted without file: ${markedDeletedWithoutFile}`);
       return deletedCount;
   } catch (err) {
       console.error('Unexpected error during cleanup:', err);
