@@ -89,6 +89,12 @@ type CreateInvoiceRequest = {
     amountStars?: number;
 };
 
+type UserLanguage = "ru" | "en";
+type UpdateUserLanguageRequest = {
+    telegramId?: number;
+    language?: UserLanguage;
+};
+
 const getBot = () => {
     if (!TELEGRAM_BOT_TOKEN) {
         return null;
@@ -386,6 +392,18 @@ app.post("/api/generate", async (req: Request, res: Response) => {
             return res.status(400).json({ error: "Missing telegramId. Please login." });
         }
 
+        const parsedSpeed = Number.parseFloat(String(speed));
+        const parsedPitch = Number.parseFloat(String(pitch));
+        const safeSpeed = Number.isFinite(parsedSpeed) ? Math.min(Math.max(parsedSpeed, 0.5), 2.0) : 1.0;
+        const safePitch = Number.isFinite(parsedPitch) ? Math.min(Math.max(parsedPitch, -1.0), 1.0) : 0;
+
+        console.log("🎛️ Voice settings:", {
+            telegramId,
+            voiceId,
+            speed: safeSpeed,
+            pitch: safePitch
+        });
+
         // Проверка квоты
         const canGen = await canGenerate(telegramId);
         if (!canGen) {
@@ -406,8 +424,8 @@ app.post("/api/generate", async (req: Request, res: Response) => {
                 voice_settings: {
                     stability: 0.7,
                     similarity_boost: 0.7,
-                    speed: parseFloat(String(speed)),
-                    pitch: parseFloat(String(pitch))
+                    speed: safeSpeed,
+                    pitch: safePitch
                 }
             })
         });
@@ -435,6 +453,36 @@ app.post("/api/generate", async (req: Request, res: Response) => {
     } catch (err: any) {
         console.error("Generation error:", err);
         res.status(500).json({ error: err.message });
+    }
+});
+
+app.post("/api/user/language", async (req: Request, res: Response) => {
+    try {
+        const { telegramId, language } = req.body as UpdateUserLanguageRequest;
+
+        if (!Number.isFinite(telegramId) || Number(telegramId) <= 0) {
+            return res.status(400).json({ error: "Invalid telegramId" });
+        }
+        if (language !== "ru" && language !== "en") {
+            return res.status(400).json({ error: "Invalid language" });
+        }
+
+        const safeTelegramId = Number(telegramId);
+        await getOrCreateUser(safeTelegramId);
+
+        const { error } = await supabase
+            .from("users")
+            .update({ language })
+            .eq("telegram_id", safeTelegramId);
+
+        if (error) {
+            throw error;
+        }
+
+        return res.json({ ok: true, language });
+    } catch (err: any) {
+        console.error("User language update error:", err);
+        return res.status(500).json({ error: err.message ?? "Failed to update language" });
     }
 });
 

@@ -13,6 +13,7 @@ export type UserRecord = {
   subscription_tier: 'free' | 'pro' | 'premium';
   subscription_expires_at: string | null;
   stars_minutes: number;
+  language: 'ru' | 'en';
   daily_minutes_used: number;
   last_reset_date: string;
 };
@@ -60,6 +61,7 @@ export async function getOrCreateUser(telegramId: number, firstName?: string, us
       first_name: firstName || '',
       username: username || '',
       subscription_tier: 'free',
+      language: 'ru',
       daily_minutes_used: 0,
       last_reset_date: new Date().toISOString().slice(0,10),
       stars_minutes: 0,
@@ -171,6 +173,7 @@ export type UserProfile = {
   subscription_tier: SubscriptionTier;
   subscription_expires_at: string | null;
   stars_minutes: number;
+  language: 'ru' | 'en';
 };
 
 export async function getUserSubscriptionTier(telegramId: number): Promise<SubscriptionTier> {
@@ -197,7 +200,8 @@ export async function getUserProfile(telegramId: number): Promise<UserProfile> {
   return {
     subscription_tier: user.subscription_tier ?? 'free',
     subscription_expires_at: user.subscription_expires_at ?? null,
-    stars_minutes: user.stars_minutes ?? 0
+    stars_minutes: user.stars_minutes ?? 0,
+    language: (user.language === 'en' ? 'en' : 'ru')
   };
 }
 
