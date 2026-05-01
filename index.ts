@@ -394,7 +394,7 @@ app.post("/api/generate", async (req: Request, res: Response) => {
 
         const parsedSpeed = Number.parseFloat(String(speed));
         const parsedPitch = Number.parseFloat(String(pitch));
-        const safeSpeed = Number.isFinite(parsedSpeed) ? Math.min(Math.max(parsedSpeed, 0.5), 2.0) : 1.0;
+        const safeSpeed = Number.isFinite(parsedSpeed) ? Math.min(Math.max(parsedSpeed, 0.7), 1.2) : 1.0;
         const safePitch = Number.isFinite(parsedPitch) ? Math.min(Math.max(parsedPitch, -1.0), 1.0) : 0;
 
         console.log("🎛️ Voice settings received:", {
