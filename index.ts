@@ -314,9 +314,40 @@ app.post("/api/create-invoice", async (req: Request, res: Response) => {
             throw error;
         }
 
+        if (!telegramBot) {
+            return res.status(503).json({ error: "Telegram bot is not configured" });
+        }
+
+        const title =
+            productType === "minutes"
+                ? `${safeProductValue} минут VoiceStudio`
+                : safeProductValue === 2
+                    ? "Premium подписка на 30 дней"
+                    : "Pro подписка на 30 дней";
+        const description =
+            productType === "minutes"
+                ? `Пакет из ${safeProductValue} дополнительных минут генерации`
+                : "Оплата подписки VoiceStudio Pro";
+        const label =
+            productType === "minutes"
+                ? `${safeProductValue} минут`
+                : safeProductValue === 2
+                    ? "Premium 30 дней"
+                    : "Pro 30 дней";
+
+        const invoiceLink = await telegramBot.createInvoiceLink(
+            title,
+            description,
+            payload,
+            "",
+            "XTR",
+            [{ label, amount: safeAmountStars }]
+        );
+
         return res.json({
             payload,
-            amountStars: safeAmountStars
+            amountStars: safeAmountStars,
+            invoiceLink
         });
     } catch (err: any) {
         console.error("Create invoice error:", err);
