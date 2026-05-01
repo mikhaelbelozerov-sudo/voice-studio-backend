@@ -82,6 +82,13 @@ const addDaysToDate = (baseDate: Date, days: number) => {
     return nextDate;
 };
 
+type CreateInvoiceRequest = {
+    telegramId?: number;
+    productType?: ProductType;
+    productValue?: number;
+    amountStars?: number;
+};
+
 const getBot = () => {
     if (!TELEGRAM_BOT_TOKEN) {
         return null;
@@ -260,6 +267,60 @@ app.post("/webhook/bot", async (req: Request, res: Response) => {
     } catch (error: any) {
         console.error("Webhook processing error:", error);
         return res.status(500).json({ error: error.message ?? "Webhook processing failed" });
+    }
+});
+
+app.post("/api/create-invoice", async (req: Request, res: Response) => {
+    try {
+        const {
+            telegramId,
+            productType,
+            productValue,
+            amountStars
+        } = req.body as CreateInvoiceRequest;
+
+        if (!Number.isFinite(telegramId) || Number(telegramId) <= 0) {
+            return res.status(400).json({ error: "Invalid telegramId" });
+        }
+
+        if (productType !== "minutes" && productType !== "subscription") {
+            return res.status(400).json({ error: "Invalid productType" });
+        }
+
+        if (!Number.isFinite(productValue) || Number(productValue) <= 0) {
+            return res.status(400).json({ error: "Invalid productValue" });
+        }
+
+        if (!Number.isFinite(amountStars) || Number(amountStars) <= 0) {
+            return res.status(400).json({ error: "Invalid amountStars" });
+        }
+
+        const safeTelegramId = Number(telegramId);
+        const safeProductValue = Number(productValue);
+        const safeAmountStars = Number(amountStars);
+        const payloadPrefix = productType === "minutes" ? "min" : "sub";
+        const payload = `${payloadPrefix}_${Date.now()}_${safeTelegramId}`;
+
+        const { error } = await supabase.from("stars_invoices").insert([{
+            id: payload,
+            telegram_id: safeTelegramId,
+            amount: safeAmountStars,
+            product_type: productType,
+            product_value: safeProductValue,
+            status: "pending"
+        }]);
+
+        if (error) {
+            throw error;
+        }
+
+        return res.json({
+            payload,
+            amountStars: safeAmountStars
+        });
+    } catch (err: any) {
+        console.error("Create invoice error:", err);
+        return res.status(500).json({ error: err.message ?? "Failed to create invoice" });
     }
 });
 
