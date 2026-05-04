@@ -22,6 +22,8 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+/** Токен @VoiceStudioSupportBot (если отличается от TELEGRAM_BOT_TOKEN). Иначе сообщения в поддержку не попадут на этот сервер. */
+const SUPPORT_BOT_TOKEN = process.env.SUPPORT_BOT_TOKEN?.trim();
 const SUPPORT_GROUP_CHAT_ID = Number(process.env.SUPPORT_GROUP_CHAT_ID ?? 0);
 const TEMP_DIR = path.join(__dirname, "temp");
 
@@ -114,6 +116,13 @@ const getBot = () => {
 
 const telegramBot = getBot();
 
+const supportBotUsesDedicatedToken =
+    Boolean(SUPPORT_BOT_TOKEN) && SUPPORT_BOT_TOKEN !== TELEGRAM_BOT_TOKEN;
+const supportBot =
+    supportBotUsesDedicatedToken && SUPPORT_BOT_TOKEN
+        ? new TelegramBot(SUPPORT_BOT_TOKEN, { webHook: true })
+        : telegramBot;
+
 const supportThreadByUser = new Map<number, number>();
 const supportUserByThread = new Map<number, number>();
 const supportRootMessageByUser = new Map<number, number>();
@@ -149,8 +158,8 @@ const resolveSupportUserFromReply = (reply?: TelegramBot.Message): number | unde
     return undefined;
 };
 
-const ensureSupportThread = async (ctx: SupportContext): Promise<number | undefined> => {
-    if (!SUPPORT_GROUP_CHAT_ID || !telegramBot) {
+const ensureSupportThread = async (ctx: SupportContext, bot: TelegramBot | null): Promise<number | undefined> => {
+    if (!SUPPORT_GROUP_CHAT_ID || !bot) {
         return undefined;
     }
     const existingThread = supportThreadByUser.get(ctx.userId);
@@ -160,7 +169,7 @@ const ensureSupportThread = async (ctx: SupportContext): Promise<number | undefi
 
     try {
         const topicTitle = `Support #${ctx.userId}${ctx.firstName ? ` • ${ctx.firstName}` : ""}`;
-        const forumTopic = await (telegramBot as any).createForumTopic(SUPPORT_GROUP_CHAT_ID, topicTitle);
+        const forumTopic = await (bot as any).createForumTopic(SUPPORT_GROUP_CHAT_ID, topicTitle);
         const threadId = Number(forumTopic?.message_thread_id);
         if (Number.isFinite(threadId) && threadId > 0) {
             supportThreadByUser.set(ctx.userId, threadId);
@@ -192,6 +201,118 @@ const logSupportMessage = async (payload: {
         }]);
     } catch (_error) {
         // Таблица support_messages может отсутствовать; логирование опционально.
+    }
+};
+
+const handleSupportBridge = async (bot: TelegramBot, msg: TelegramBot.Message): Promise<void> => {
+    const fromUser = msg.from;
+
+    // Support bridge: private user -> support group (forum thread or reply chain).
+    if (
+        SUPPORT_GROUP_CHAT_ID &&
+        fromUser &&
+        !fromUser.is_bot &&
+        msg.chat.type === "private" &&
+        typeof msg.text === "string" &&
+        msg.text.trim().length > 0
+    ) {
+        const userId = fromUser.id;
+        if (!canSendSupportMessage(userId)) {
+            await bot.sendMessage(
+                msg.chat.id,
+                "Слишком часто. Пожалуйста, отправляйте не более 3 сообщений в минуту."
+            );
+            return;
+        }
+
+        const supportThreadId = await ensureSupportThread(
+            {
+                userId,
+                firstName: fromUser.first_name,
+                username: fromUser.username
+            },
+            bot
+        );
+
+        const userTag = fromUser.username ? `@${fromUser.username}` : fromUser.first_name ?? "Unknown";
+        const supportText = [
+            "📩 Новое сообщение в поддержку",
+            `👤 ${userTag}`,
+            `🆔 ${userId}`,
+            "",
+            msg.text
+        ].join("\n");
+
+        const sendOptions: TelegramBot.SendMessageOptions = {};
+        if (supportThreadId) {
+            (sendOptions as any).message_thread_id = supportThreadId;
+        } else {
+            const rootMessageId = supportRootMessageByUser.get(userId);
+            if (rootMessageId) {
+                sendOptions.reply_to_message_id = rootMessageId;
+            }
+        }
+
+        try {
+            const sent = await bot.sendMessage(SUPPORT_GROUP_CHAT_ID, supportText, sendOptions);
+            supportUserByGroupMessage.set(sent.message_id, userId);
+            if (!supportRootMessageByUser.has(userId)) {
+                supportRootMessageByUser.set(userId, sent.message_id);
+            }
+            await logSupportMessage({
+                userId,
+                direction: "user_to_group",
+                text: msg.text,
+                groupMessageId: sent.message_id,
+                userMessageId: msg.message_id,
+                threadId: supportThreadId
+            });
+            await bot.sendMessage(msg.chat.id, "Сообщение отправлено в поддержку. Мы ответим в этом чате.");
+        } catch (error) {
+            console.error("Support forward to group failed:", error);
+            await bot.sendMessage(msg.chat.id, "Не удалось отправить сообщение в поддержку. Попробуйте позже.");
+        }
+        return;
+    }
+
+    // Support bridge: admin reply in support group -> user private chat.
+    if (
+        SUPPORT_GROUP_CHAT_ID &&
+        fromUser &&
+        !fromUser.is_bot &&
+        msg.chat.id === SUPPORT_GROUP_CHAT_ID &&
+        typeof msg.text === "string" &&
+        msg.text.trim().length > 0
+    ) {
+        const threadId = Number((msg as any).message_thread_id ?? 0);
+        const fromThread = Number.isFinite(threadId) && threadId > 0 ? supportUserByThread.get(threadId) : undefined;
+        const fromReply = resolveSupportUserFromReply(msg.reply_to_message);
+        const targetUserId = fromThread ?? fromReply;
+
+        if (!targetUserId) {
+            return;
+        }
+
+        try {
+            const responseText = `💬 Ответ поддержки:\n\n${msg.text}`;
+            const sentToUser = await bot.sendMessage(targetUserId, responseText);
+            supportUserByGroupMessage.set(msg.message_id, targetUserId);
+            await logSupportMessage({
+                userId: targetUserId,
+                direction: "group_to_user",
+                text: msg.text,
+                groupMessageId: msg.message_id,
+                userMessageId: sentToUser.message_id,
+                threadId: Number.isFinite(threadId) && threadId > 0 ? threadId : undefined
+            });
+        } catch (error) {
+            console.error("Support reply to user failed:", error);
+            await bot.sendMessage(
+                msg.chat.id,
+                `Не удалось отправить ответ пользователю ${targetUserId}. Возможно, пользователь заблокировал бота.`,
+                Number.isFinite(threadId) && threadId > 0 ? { reply_to_message_id: msg.message_id } : undefined
+            );
+        }
     }
 };
 
@@ -350,112 +471,19 @@ if (!telegramBot) {
             return;
         }
 
-        // Support bridge: private user -> support group (forum thread or reply chain).
-        const fromUser = msg.from;
-        if (
-            SUPPORT_GROUP_CHAT_ID &&
-            fromUser &&
-            !fromUser.is_bot &&
-            msg.chat.type === "private" &&
-            typeof msg.text === "string" &&
-            msg.text.trim().length > 0
-        ) {
-            const userId = fromUser.id;
-            if (!canSendSupportMessage(userId)) {
-                await telegramBot.sendMessage(
-                    msg.chat.id,
-                    "Слишком часто. Пожалуйста, отправляйте не более 3 сообщений в минуту."
-                );
-                return;
-            }
-
-            const supportThreadId = await ensureSupportThread({
-                userId,
-                firstName: fromUser.first_name,
-                username: fromUser.username
-            });
-
-            const userTag = fromUser.username ? `@${fromUser.username}` : fromUser.first_name ?? "Unknown";
-            const supportText = [
-                "📩 Новое сообщение в поддержку",
-                `👤 ${userTag}`,
-                `🆔 ${userId}`,
-                "",
-                msg.text
-            ].join("\n");
-
-            const sendOptions: TelegramBot.SendMessageOptions = {};
-            if (supportThreadId) {
-                (sendOptions as any).message_thread_id = supportThreadId;
-            } else {
-                const rootMessageId = supportRootMessageByUser.get(userId);
-                if (rootMessageId) {
-                    sendOptions.reply_to_message_id = rootMessageId;
-                }
-            }
-
-            try {
-                const sent = await telegramBot.sendMessage(SUPPORT_GROUP_CHAT_ID, supportText, sendOptions);
-                supportUserByGroupMessage.set(sent.message_id, userId);
-                if (!supportRootMessageByUser.has(userId)) {
-                    supportRootMessageByUser.set(userId, sent.message_id);
-                }
-                await logSupportMessage({
-                    userId,
-                    direction: "user_to_group",
-                    text: msg.text,
-                    groupMessageId: sent.message_id,
-                    userMessageId: msg.message_id,
-                    threadId: supportThreadId
-                });
-                await telegramBot.sendMessage(msg.chat.id, "Сообщение отправлено в поддержку. Мы ответим в этом чате.");
-            } catch (error) {
-                console.error("Support forward to group failed:", error);
-                await telegramBot.sendMessage(msg.chat.id, "Не удалось отправить сообщение в поддержку. Попробуйте позже.");
-            }
-            return;
-        }
-
-        // Support bridge: admin reply in support group -> user private chat.
-        if (
-            SUPPORT_GROUP_CHAT_ID &&
-            fromUser &&
-            !fromUser.is_bot &&
-            msg.chat.id === SUPPORT_GROUP_CHAT_ID &&
-            typeof msg.text === "string" &&
-            msg.text.trim().length > 0
-        ) {
-            const threadId = Number((msg as any).message_thread_id ?? 0);
-            const fromThread = Number.isFinite(threadId) && threadId > 0 ? supportUserByThread.get(threadId) : undefined;
-            const fromReply = resolveSupportUserFromReply(msg.reply_to_message);
-            const targetUserId = fromThread ?? fromReply;
-
-            if (!targetUserId) {
-                return;
-            }
-
-            try {
-                const responseText = `💬 Ответ поддержки:\n\n${msg.text}`;
-                const sentToUser = await telegramBot.sendMessage(targetUserId, responseText);
-                supportUserByGroupMessage.set(msg.message_id, targetUserId);
-                await logSupportMessage({
-                    userId: targetUserId,
-                    direction: "group_to_user",
-                    text: msg.text,
-                    groupMessageId: msg.message_id,
-                    userMessageId: sentToUser.message_id,
-                    threadId: Number.isFinite(threadId) && threadId > 0 ? threadId : undefined
-                });
-            } catch (error) {
-                console.error("Support reply to user failed:", error);
-                await telegramBot.sendMessage(
-                    msg.chat.id,
-                    `Не удалось отправить ответ пользователю ${targetUserId}. Возможно, пользователь заблокировал бота.`,
-                    Number.isFinite(threadId) && threadId > 0 ? { reply_to_message_id: msg.message_id } : undefined
-                );
-            }
+        if (!supportBotUsesDedicatedToken) {
+            await handleSupportBridge(telegramBot, msg);
         }
     });
+}
+
+if (supportBotUsesDedicatedToken && supportBot) {
+    supportBot.on("message", async (msg: TelegramBot.Message) => {
+        await handleSupportBridge(supportBot, msg);
+    });
+    console.log(
+        "Support relay: задан SUPPORT_BOT_TOKEN — укажите для этого бота webhook на POST /webhook/support-bot (тот же хост, что и основной бот)."
+    );
 }
 
 app.post("/webhook/bot", async (req: Request, res: Response) => {
@@ -468,6 +496,20 @@ app.post("/webhook/bot", async (req: Request, res: Response) => {
         return res.sendStatus(200);
     } catch (error: any) {
         console.error("Webhook processing error:", error);
+        return res.status(500).json({ error: error.message ?? "Webhook processing failed" });
+    }
+});
+
+app.post("/webhook/support-bot", async (req: Request, res: Response) => {
+    if (!supportBotUsesDedicatedToken || !supportBot) {
+        return res.status(404).json({ error: "Dedicated support bot is not configured (set SUPPORT_BOT_TOKEN)" });
+    }
+
+    try {
+        supportBot.processUpdate(req.body);
+        return res.sendStatus(200);
+    } catch (error: any) {
+        console.error("Support bot webhook processing error:", error);
         return res.status(500).json({ error: error.message ?? "Webhook processing failed" });
     }
 });
