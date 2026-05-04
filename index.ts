@@ -22,7 +22,17 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const SUPPORT_GROUP_CHAT_ID = Number(process.env.SUPPORT_GROUP_CHAT_ID ?? 0);
 const TEMP_DIR = path.join(__dirname, "temp");
+
+const SUPPORT_RATE_LIMIT_WINDOW_MS = 60_000;
+const SUPPORT_RATE_LIMIT_MAX_MESSAGES = 3;
+
+type SupportContext = {
+    userId: number;
+    firstName?: string;
+    username?: string;
+};
 
 // Проверка ключа ElevenLabs
 if (!ELEVENLABS_API_KEY) {
@@ -103,6 +113,87 @@ const getBot = () => {
 };
 
 const telegramBot = getBot();
+
+const supportThreadByUser = new Map<number, number>();
+const supportUserByThread = new Map<number, number>();
+const supportRootMessageByUser = new Map<number, number>();
+const supportUserByGroupMessage = new Map<number, number>();
+const supportRateLimit = new Map<number, number[]>();
+
+const normalizeRateWindow = (timestamps: number[], now: number) =>
+    timestamps.filter((timestamp) => now - timestamp < SUPPORT_RATE_LIMIT_WINDOW_MS);
+
+const canSendSupportMessage = (userId: number): boolean => {
+    const now = Date.now();
+    const timestamps = normalizeRateWindow(supportRateLimit.get(userId) ?? [], now);
+    if (timestamps.length >= SUPPORT_RATE_LIMIT_MAX_MESSAGES) {
+        supportRateLimit.set(userId, timestamps);
+        return false;
+    }
+    timestamps.push(now);
+    supportRateLimit.set(userId, timestamps);
+    return true;
+};
+
+const resolveSupportUserFromReply = (reply?: TelegramBot.Message): number | undefined => {
+    if (!reply) {
+        return undefined;
+    }
+    const direct = supportUserByGroupMessage.get(reply.message_id);
+    if (direct) {
+        return direct;
+    }
+    if (reply.reply_to_message) {
+        return resolveSupportUserFromReply(reply.reply_to_message);
+    }
+    return undefined;
+};
+
+const ensureSupportThread = async (ctx: SupportContext): Promise<number | undefined> => {
+    if (!SUPPORT_GROUP_CHAT_ID || !telegramBot) {
+        return undefined;
+    }
+    const existingThread = supportThreadByUser.get(ctx.userId);
+    if (existingThread) {
+        return existingThread;
+    }
+
+    try {
+        const topicTitle = `Support #${ctx.userId}${ctx.firstName ? ` • ${ctx.firstName}` : ""}`;
+        const forumTopic = await (telegramBot as any).createForumTopic(SUPPORT_GROUP_CHAT_ID, topicTitle);
+        const threadId = Number(forumTopic?.message_thread_id);
+        if (Number.isFinite(threadId) && threadId > 0) {
+            supportThreadByUser.set(ctx.userId, threadId);
+            supportUserByThread.set(threadId, ctx.userId);
+            return threadId;
+        }
+    } catch (error) {
+        console.warn("Support forum topic creation failed, fallback to reply threads:", error);
+    }
+    return undefined;
+};
+
+const logSupportMessage = async (payload: {
+    userId: number;
+    direction: "user_to_group" | "group_to_user";
+    text: string;
+    groupMessageId?: number;
+    userMessageId?: number;
+    threadId?: number;
+}) => {
+    try {
+        await supabase.from("support_messages").insert([{
+            telegram_id: payload.userId,
+            direction: payload.direction,
+            text: payload.text,
+            group_message_id: payload.groupMessageId ?? null,
+            user_message_id: payload.userMessageId ?? null,
+            thread_id: payload.threadId ?? null
+        }]);
+    } catch (_error) {
+        // Таблица support_messages может отсутствовать; логирование опционально.
+    }
+};
 
 if (!telegramBot) {
     console.warn("⚠️ TELEGRAM_BOT_TOKEN is not set. Telegram payments are disabled.");
@@ -196,68 +287,173 @@ if (!telegramBot) {
     });
 
     telegramBot.on("message", async (msg: TelegramBot.Message) => {
-        if (!msg.successful_payment) {
+        if (msg.successful_payment) {
+            const payment = msg.successful_payment;
+            const payload = payment.invoice_payload;
+            const telegramId = msg.from?.id;
+
+            if (!telegramId) {
+                return;
+            }
+
+            try {
+                const { data: invoice, error: invoiceError } = await supabase
+                    .from("stars_invoices")
+                    .select("id, telegram_id, amount, product_type, product_value, status")
+                    .eq("id", payload)
+                    .single();
+
+                if (invoiceError || !invoice || invoice.status === "paid") {
+                    throw new Error("Invoice not found or already paid");
+                }
+
+                await supabase
+                    .from("stars_invoices")
+                    .update({ status: "paid" })
+                    .eq("id", payload);
+
+                await supabase.from("payments").insert([{
+                    telegram_payment_charge_id: payment.telegram_payment_charge_id,
+                    invoice_id: payload,
+                    amount: payment.total_amount
+                }]);
+
+                const user = await getOrCreateUser(telegramId);
+
+                if (invoice.product_type === "minutes") {
+                    const nextMinutes = (user.stars_minutes ?? 0) + Number(invoice.product_value);
+                    await supabase
+                        .from("users")
+                        .update({ stars_minutes: nextMinutes })
+                        .eq("telegram_id", telegramId);
+                } else if (invoice.product_type === "subscription") {
+                    const nextTier = Number(invoice.product_value) === 2 ? "premium" : "pro";
+                    const currentExpiry = user.subscription_expires_at ? new Date(user.subscription_expires_at) : null;
+                    const now = new Date();
+                    const startDate = currentExpiry && currentExpiry.getTime() > now.getTime() ? currentExpiry : now;
+                    const nextExpiry = addDaysToDate(startDate, 30);
+
+                    await supabase
+                        .from("users")
+                        .update({
+                            subscription_tier: nextTier,
+                            subscription_expires_at: nextExpiry.toISOString()
+                        })
+                        .eq("telegram_id", telegramId);
+                }
+
+                await telegramBot.sendMessage(msg.chat.id, "Оплата прошла успешно! Доступ обновлён.");
+            } catch (error) {
+                console.error("Failed to process successful payment:", error);
+                await telegramBot.sendMessage(msg.chat.id, "Платёж получен, но произошла ошибка обработки. Поддержка уже уведомлена.");
+            }
             return;
         }
 
-        const payment = msg.successful_payment;
-        const payload = payment.invoice_payload;
-        const telegramId = msg.from?.id;
+        // Support bridge: private user -> support group (forum thread or reply chain).
+        const fromUser = msg.from;
+        if (
+            SUPPORT_GROUP_CHAT_ID &&
+            fromUser &&
+            !fromUser.is_bot &&
+            msg.chat.type === "private" &&
+            typeof msg.text === "string" &&
+            msg.text.trim().length > 0
+        ) {
+            const userId = fromUser.id;
+            if (!canSendSupportMessage(userId)) {
+                await telegramBot.sendMessage(
+                    msg.chat.id,
+                    "Слишком часто. Пожалуйста, отправляйте не более 3 сообщений в минуту."
+                );
+                return;
+            }
 
-        if (!telegramId) {
+            const supportThreadId = await ensureSupportThread({
+                userId,
+                firstName: fromUser.first_name,
+                username: fromUser.username
+            });
+
+            const userTag = fromUser.username ? `@${fromUser.username}` : fromUser.first_name ?? "Unknown";
+            const supportText = [
+                "📩 Новое сообщение в поддержку",
+                `👤 ${userTag}`,
+                `🆔 ${userId}`,
+                "",
+                msg.text
+            ].join("\n");
+
+            const sendOptions: TelegramBot.SendMessageOptions = {};
+            if (supportThreadId) {
+                (sendOptions as any).message_thread_id = supportThreadId;
+            } else {
+                const rootMessageId = supportRootMessageByUser.get(userId);
+                if (rootMessageId) {
+                    sendOptions.reply_to_message_id = rootMessageId;
+                }
+            }
+
+            try {
+                const sent = await telegramBot.sendMessage(SUPPORT_GROUP_CHAT_ID, supportText, sendOptions);
+                supportUserByGroupMessage.set(sent.message_id, userId);
+                if (!supportRootMessageByUser.has(userId)) {
+                    supportRootMessageByUser.set(userId, sent.message_id);
+                }
+                await logSupportMessage({
+                    userId,
+                    direction: "user_to_group",
+                    text: msg.text,
+                    groupMessageId: sent.message_id,
+                    userMessageId: msg.message_id,
+                    threadId: supportThreadId
+                });
+                await telegramBot.sendMessage(msg.chat.id, "Сообщение отправлено в поддержку. Мы ответим в этом чате.");
+            } catch (error) {
+                console.error("Support forward to group failed:", error);
+                await telegramBot.sendMessage(msg.chat.id, "Не удалось отправить сообщение в поддержку. Попробуйте позже.");
+            }
             return;
         }
 
-        try {
-            const { data: invoice, error: invoiceError } = await supabase
-                .from("stars_invoices")
-                .select("id, telegram_id, amount, product_type, product_value, status")
-                .eq("id", payload)
-                .single();
+        // Support bridge: admin reply in support group -> user private chat.
+        if (
+            SUPPORT_GROUP_CHAT_ID &&
+            fromUser &&
+            !fromUser.is_bot &&
+            msg.chat.id === SUPPORT_GROUP_CHAT_ID &&
+            typeof msg.text === "string" &&
+            msg.text.trim().length > 0
+        ) {
+            const threadId = Number((msg as any).message_thread_id ?? 0);
+            const fromThread = Number.isFinite(threadId) && threadId > 0 ? supportUserByThread.get(threadId) : undefined;
+            const fromReply = resolveSupportUserFromReply(msg.reply_to_message);
+            const targetUserId = fromThread ?? fromReply;
 
-            if (invoiceError || !invoice || invoice.status === "paid") {
-                throw new Error("Invoice not found or already paid");
+            if (!targetUserId) {
+                return;
             }
 
-            await supabase
-                .from("stars_invoices")
-                .update({ status: "paid" })
-                .eq("id", payload);
-
-            await supabase.from("payments").insert([{
-                telegram_payment_charge_id: payment.telegram_payment_charge_id,
-                invoice_id: payload,
-                amount: payment.total_amount
-            }]);
-
-            const user = await getOrCreateUser(telegramId);
-
-            if (invoice.product_type === "minutes") {
-                const nextMinutes = (user.stars_minutes ?? 0) + Number(invoice.product_value);
-                await supabase
-                    .from("users")
-                    .update({ stars_minutes: nextMinutes })
-                    .eq("telegram_id", telegramId);
-            } else if (invoice.product_type === "subscription") {
-                const nextTier = Number(invoice.product_value) === 2 ? "premium" : "pro";
-                const currentExpiry = user.subscription_expires_at ? new Date(user.subscription_expires_at) : null;
-                const now = new Date();
-                const startDate = currentExpiry && currentExpiry.getTime() > now.getTime() ? currentExpiry : now;
-                const nextExpiry = addDaysToDate(startDate, 30);
-
-                await supabase
-                    .from("users")
-                    .update({
-                        subscription_tier: nextTier,
-                        subscription_expires_at: nextExpiry.toISOString()
-                    })
-                    .eq("telegram_id", telegramId);
+            try {
+                const responseText = `💬 Ответ поддержки:\n\n${msg.text}`;
+                const sentToUser = await telegramBot.sendMessage(targetUserId, responseText);
+                supportUserByGroupMessage.set(msg.message_id, targetUserId);
+                await logSupportMessage({
+                    userId: targetUserId,
+                    direction: "group_to_user",
+                    text: msg.text,
+                    groupMessageId: msg.message_id,
+                    userMessageId: sentToUser.message_id,
+                    threadId: Number.isFinite(threadId) && threadId > 0 ? threadId : undefined
+                });
+            } catch (error) {
+                console.error("Support reply to user failed:", error);
+                await telegramBot.sendMessage(
+                    msg.chat.id,
+                    `Не удалось отправить ответ пользователю ${targetUserId}. Возможно, пользователь заблокировал бота.`,
+                    Number.isFinite(threadId) && threadId > 0 ? { reply_to_message_id: msg.message_id } : undefined
+                );
             }
-
-            await telegramBot.sendMessage(msg.chat.id, "Оплата прошла успешно! Доступ обновлён.");
-        } catch (error) {
-            console.error("Failed to process successful payment:", error);
-            await telegramBot.sendMessage(msg.chat.id, "Платёж получен, но произошла ошибка обработки. Поддержка уже уведомлена.");
         }
     });
 }
