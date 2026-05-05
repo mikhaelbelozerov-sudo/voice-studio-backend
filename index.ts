@@ -25,6 +25,8 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 /** Токен @VoiceStudioSupportBot (если отличается от TELEGRAM_BOT_TOKEN). Иначе сообщения в поддержку не попадут на этот сервер. */
 const SUPPORT_BOT_TOKEN = process.env.SUPPORT_BOT_TOKEN?.trim();
 const SUPPORT_GROUP_CHAT_ID = Number(process.env.SUPPORT_GROUP_CHAT_ID ?? 0);
+/** Публичный HTTPS URL фронтенда Mini App (Vercel). Для кнопки web_app в /start. */
+const MINI_APP_URL = process.env.MINI_APP_URL?.trim() ?? "";
 const TEMP_DIR = path.join(__dirname, "temp");
 
 const SUPPORT_RATE_LIMIT_WINDOW_MS = 60_000;
@@ -225,6 +227,53 @@ const getSupportUiText = (
     return localized[language][key];
 };
 
+const getMiniAppStartCopy = (language: UserLanguage) =>
+    language === "en"
+        ? {
+              intro: "Open VoiceStudio using the button below — Mini App opens like the in-app Web App button.",
+              button: "Open VoiceStudio",
+              noUrl: "Mini App URL is not configured on the server. Please contact support."
+          }
+        : {
+              intro: "Откройте VoiceStudio кнопкой ниже — Mini App откроется так же, как через кнопку в приложении.",
+              button: "Открыть VoiceStudio",
+              noUrl: "Адрес Mini App на сервере не задан. Напишите в поддержку."
+          };
+
+const sendVoiceStudioWebAppKeyboard = async (bot: TelegramBot, chatId: number, language: UserLanguage) => {
+    const copy = getMiniAppStartCopy(language);
+    if (!MINI_APP_URL) {
+        await bot.sendMessage(chatId, copy.noUrl);
+        return;
+    }
+    await bot.sendMessage(chatId, copy.intro, {
+        reply_markup: {
+            keyboard: [[{ text: copy.button, web_app: { url: MINI_APP_URL } }]],
+            resize_keyboard: true,
+            is_persistent: true
+        }
+    });
+};
+
+const registerVoiceStudioWebAppStart = (bot: TelegramBot | null) => {
+    if (!bot) {
+        return;
+    }
+    bot.onText(/^\/start(?:\s|$)/i, async (msg: TelegramBot.Message) => {
+        const from = msg.from;
+        if (msg.chat.type !== "private" || !from || from.is_bot) {
+            return;
+        }
+        const uid = from.id;
+        const userLanguage = (await getOrCreateUser(uid)).language === "en" ? "en" : "ru";
+        try {
+            await sendVoiceStudioWebAppKeyboard(bot, msg.chat.id, userLanguage);
+        } catch (error) {
+            console.error("Failed to send Mini App keyboard:", error);
+        }
+    });
+};
+
 const handleSupportBridge = async (bot: TelegramBot, msg: TelegramBot.Message): Promise<void> => {
     const fromUser = msg.from;
 
@@ -237,6 +286,9 @@ const handleSupportBridge = async (bot: TelegramBot, msg: TelegramBot.Message): 
         typeof msg.text === "string" &&
         msg.text.trim().length > 0
     ) {
+        if (msg.text.trim().startsWith("/")) {
+            return;
+        }
         const userId = fromUser.id;
         const userLanguage = (await getOrCreateUser(userId)).language === "en" ? "en" : "ru";
         if (!canSendSupportMessage(userId)) {
@@ -342,6 +394,10 @@ const handleSupportBridge = async (bot: TelegramBot, msg: TelegramBot.Message): 
 if (!telegramBot) {
     console.warn("⚠️ TELEGRAM_BOT_TOKEN is not set. Telegram payments are disabled.");
 } else {
+    registerVoiceStudioWebAppStart(telegramBot);
+    if (!MINI_APP_URL) {
+        console.warn("⚠️ MINI_APP_URL is not set — /start на основном боте не сможет показать кнопку web_app.");
+    }
     telegramBot.onText(/^\/buy/i, async (msg: TelegramBot.Message) => {
         const chatId = msg.chat.id;
         try {
