@@ -230,17 +230,18 @@ const getSupportUiText = (
 const getMiniAppStartCopy = (language: UserLanguage) =>
     language === "en"
         ? {
-              intro: "Open VoiceStudio using the button below — Mini App opens like the in-app Web App button.",
+              intro: "Tap the button below to open VoiceStudio.",
               button: "Open VoiceStudio",
               noUrl: "Mini App URL is not configured on the server. Please contact support."
           }
         : {
-              intro: "Откройте VoiceStudio кнопкой ниже — Mini App откроется так же, как через кнопку в приложении.",
+              intro: "Нажмите кнопку ниже, чтобы открыть VoiceStudio.",
               button: "Открыть VoiceStudio",
               noUrl: "Адрес Mini App на сервере не задан. Напишите в поддержку."
           };
 
-const sendVoiceStudioWebAppKeyboard = async (bot: TelegramBot, chatId: number, language: UserLanguage) => {
+/** Inline `web_app` — на iPhone обычно ближе к открытию через «Открыть», чем кнопка в Reply Keyboard. */
+const sendVoiceStudioWebAppOpenButton = async (bot: TelegramBot, chatId: number, language: UserLanguage) => {
     const copy = getMiniAppStartCopy(language);
     if (!MINI_APP_URL) {
         await bot.sendMessage(chatId, copy.noUrl);
@@ -248,9 +249,7 @@ const sendVoiceStudioWebAppKeyboard = async (bot: TelegramBot, chatId: number, l
     }
     await bot.sendMessage(chatId, copy.intro, {
         reply_markup: {
-            keyboard: [[{ text: copy.button, web_app: { url: MINI_APP_URL } }]],
-            resize_keyboard: true,
-            is_persistent: true
+            inline_keyboard: [[{ text: copy.button, web_app: { url: MINI_APP_URL } }]]
         }
     });
 };
@@ -267,9 +266,9 @@ const registerVoiceStudioWebAppStart = (bot: TelegramBot | null) => {
         const uid = from.id;
         const userLanguage = (await getOrCreateUser(uid)).language === "en" ? "en" : "ru";
         try {
-            await sendVoiceStudioWebAppKeyboard(bot, msg.chat.id, userLanguage);
+            await sendVoiceStudioWebAppOpenButton(bot, msg.chat.id, userLanguage);
         } catch (error) {
-            console.error("Failed to send Mini App keyboard:", error);
+            console.error("Failed to send Mini App open button:", error);
         }
     });
 };
