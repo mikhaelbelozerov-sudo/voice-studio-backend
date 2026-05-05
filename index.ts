@@ -204,6 +204,27 @@ const logSupportMessage = async (payload: {
     }
 };
 
+const getSupportUiText = (
+    language: UserLanguage,
+    key: "rate_limited" | "sent" | "send_error" | "support_reply_prefix"
+): string => {
+    const localized: Record<UserLanguage, Record<"rate_limited" | "sent" | "send_error" | "support_reply_prefix", string>> = {
+        ru: {
+            rate_limited: "Слишком часто. Пожалуйста, отправляйте не более 3 сообщений в минуту.",
+            sent: "Сообщение отправлено в поддержку. Мы ответим в этом чате.",
+            send_error: "Не удалось отправить сообщение в поддержку. Попробуйте позже.",
+            support_reply_prefix: "💬 Ответ поддержки:"
+        },
+        en: {
+            rate_limited: "Too many messages. Please send no more than 3 messages per minute.",
+            sent: "Your message has been sent to support. We will reply in this chat.",
+            send_error: "Failed to send your message to support. Please try again later.",
+            support_reply_prefix: "💬 Support reply:"
+        }
+    };
+    return localized[language][key];
+};
+
 const handleSupportBridge = async (bot: TelegramBot, msg: TelegramBot.Message): Promise<void> => {
     const fromUser = msg.from;
 
@@ -217,10 +238,11 @@ const handleSupportBridge = async (bot: TelegramBot, msg: TelegramBot.Message): 
         msg.text.trim().length > 0
     ) {
         const userId = fromUser.id;
+        const userLanguage = (await getOrCreateUser(userId)).language === "en" ? "en" : "ru";
         if (!canSendSupportMessage(userId)) {
             await bot.sendMessage(
                 msg.chat.id,
-                "Слишком часто. Пожалуйста, отправляйте не более 3 сообщений в минуту."
+                getSupportUiText(userLanguage, "rate_limited")
             );
             return;
         }
@@ -267,10 +289,10 @@ const handleSupportBridge = async (bot: TelegramBot, msg: TelegramBot.Message): 
                 userMessageId: msg.message_id,
                 threadId: supportThreadId
             });
-            await bot.sendMessage(msg.chat.id, "Сообщение отправлено в поддержку. Мы ответим в этом чате.");
+            await bot.sendMessage(msg.chat.id, getSupportUiText(userLanguage, "sent"));
         } catch (error) {
             console.error("Support forward to group failed:", error);
-            await bot.sendMessage(msg.chat.id, "Не удалось отправить сообщение в поддержку. Попробуйте позже.");
+            await bot.sendMessage(msg.chat.id, getSupportUiText(userLanguage, "send_error"));
         }
         return;
     }
@@ -294,7 +316,8 @@ const handleSupportBridge = async (bot: TelegramBot, msg: TelegramBot.Message): 
         }
 
         try {
-            const responseText = `💬 Ответ поддержки:\n\n${msg.text}`;
+            const targetUserLanguage = (await getOrCreateUser(targetUserId)).language === "en" ? "en" : "ru";
+            const responseText = `${getSupportUiText(targetUserLanguage, "support_reply_prefix")}\n\n${msg.text}`;
             const sentToUser = await bot.sendMessage(targetUserId, responseText);
             supportUserByGroupMessage.set(msg.message_id, targetUserId);
             await logSupportMessage({
