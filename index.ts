@@ -25,8 +25,28 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 /** Токен @VoiceStudioSupportBot (если отличается от TELEGRAM_BOT_TOKEN). Иначе сообщения в поддержку не попадут на этот сервер. */
 const SUPPORT_BOT_TOKEN = process.env.SUPPORT_BOT_TOKEN?.trim();
 const SUPPORT_GROUP_CHAT_ID = Number(process.env.SUPPORT_GROUP_CHAT_ID ?? 0);
-/** Публичный HTTPS URL фронтенда Mini App (Vercel). Для кнопки web_app в /start. */
+/** Публичный HTTPS URL фронтенда Mini App (как в BotFather → Main App). */
 const MINI_APP_URL = process.env.MINI_APP_URL?.trim() ?? "";
+/**
+ * Direct link Mini App из BotFather (например https://t.me/voicestudioprobot/app).
+ * Его нужно указывать в web_app-кнопках: на iPhone открытие совпадает с голубой кнопкой «Открыть».
+ * Если не задан — используется MINI_APP_URL (часто открывается как нижняя шторка).
+ */
+const normalizeTelegramHttpsUrl = (raw: string): string => {
+    const t = raw.trim();
+    if (!t) {
+        return "";
+    }
+    if (t.startsWith("https://") || t.startsWith("http://")) {
+        return t;
+    }
+    if (t.startsWith("t.me/")) {
+        return `https://${t}`;
+    }
+    return t;
+};
+const MINI_APP_TELEGRAM_LINK = normalizeTelegramHttpsUrl(process.env.MINI_APP_TELEGRAM_LINK ?? "");
+const miniAppWebAppOpenUrl = MINI_APP_TELEGRAM_LINK || MINI_APP_URL;
 const TEMP_DIR = path.join(__dirname, "temp");
 
 const SUPPORT_RATE_LIMIT_WINDOW_MS = 60_000;
@@ -243,13 +263,13 @@ const getMiniAppStartCopy = (language: UserLanguage) =>
 /** Inline `web_app` — на iPhone обычно ближе к открытию через «Открыть», чем кнопка в Reply Keyboard. */
 const sendVoiceStudioWebAppOpenButton = async (bot: TelegramBot, chatId: number, language: UserLanguage) => {
     const copy = getMiniAppStartCopy(language);
-    if (!MINI_APP_URL) {
+    if (!miniAppWebAppOpenUrl) {
         await bot.sendMessage(chatId, copy.noUrl);
         return;
     }
     await bot.sendMessage(chatId, copy.intro, {
         reply_markup: {
-            inline_keyboard: [[{ text: copy.button, web_app: { url: MINI_APP_URL } }]]
+            inline_keyboard: [[{ text: copy.button, web_app: { url: miniAppWebAppOpenUrl } }]]
         }
     });
 };
@@ -394,8 +414,14 @@ if (!telegramBot) {
     console.warn("⚠️ TELEGRAM_BOT_TOKEN is not set. Telegram payments are disabled.");
 } else {
     registerVoiceStudioWebAppStart(telegramBot);
-    if (!MINI_APP_URL) {
-        console.warn("⚠️ MINI_APP_URL is not set — /start на основном боте не сможет показать кнопку web_app.");
+    if (!miniAppWebAppOpenUrl) {
+        console.warn(
+            "⚠️ Задайте MINI_APP_TELEGRAM_LINK или MINI_APP_URL — иначе /start не покажет кнопку web_app."
+        );
+    } else if (!MINI_APP_TELEGRAM_LINK && MINI_APP_URL) {
+        console.warn(
+            "⚠️ MINI_APP_TELEGRAM_LINK не задан — web_app использует URL сайта; на iPhone часто будет нижняя шторка. Укажите direct link: https://t.me/<бот>/<app>"
+        );
     }
     telegramBot.onText(/^\/buy/i, async (msg: TelegramBot.Message) => {
         const chatId = msg.chat.id;
