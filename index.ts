@@ -111,7 +111,7 @@ const getBot = () => {
     if (!TELEGRAM_BOT_TOKEN) {
         return null;
     }
-    return new TelegramBot(TELEGRAM_BOT_TOKEN, { webHook: true });
+    return new TelegramBot(TELEGRAM_BOT_TOKEN);
 };
 
 const telegramBot = getBot();
@@ -120,7 +120,7 @@ const supportBotUsesDedicatedToken =
     Boolean(SUPPORT_BOT_TOKEN) && SUPPORT_BOT_TOKEN !== TELEGRAM_BOT_TOKEN;
 const supportBot =
     supportBotUsesDedicatedToken && SUPPORT_BOT_TOKEN
-        ? new TelegramBot(SUPPORT_BOT_TOKEN, { webHook: true })
+        ? new TelegramBot(SUPPORT_BOT_TOKEN)
         : telegramBot;
 
 const supportThreadByUser = new Map<number, number>();
