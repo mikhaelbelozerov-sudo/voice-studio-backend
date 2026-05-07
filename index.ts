@@ -267,11 +267,24 @@ const sendVoiceStudioWebAppOpenButton = async (bot: TelegramBot, chatId: number,
         await bot.sendMessage(chatId, copy.noUrl);
         return;
     }
-    await bot.sendMessage(chatId, copy.intro, {
-        reply_markup: {
-            inline_keyboard: [[{ text: copy.button, web_app: { url: miniAppWebAppOpenUrl } }]]
+    const sendWithUrl = async (url: string) =>
+        bot.sendMessage(chatId, copy.intro, {
+            reply_markup: {
+                inline_keyboard: [[{ text: copy.button, web_app: { url } }]]
+            }
+        });
+
+    try {
+        await sendWithUrl(miniAppWebAppOpenUrl);
+    } catch (error) {
+        // Telegram может отклонять некоторые URL для web_app (из-за доменных ограничений клиента/бота).
+        if (MINI_APP_URL && miniAppWebAppOpenUrl !== MINI_APP_URL) {
+            console.warn("Primary web_app URL rejected, fallback to MINI_APP_URL:", error);
+            await sendWithUrl(MINI_APP_URL);
+            return;
         }
-    });
+        throw error;
+    }
 };
 
 const registerVoiceStudioWebAppStart = (bot: TelegramBot | null) => {
