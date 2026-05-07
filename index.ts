@@ -263,18 +263,8 @@ const getMiniAppStartCopy = (language: UserLanguage) =>
 /** Inline `web_app` — на iPhone обычно ближе к открытию через «Открыть», чем кнопка в Reply Keyboard. */
 const sendVoiceStudioWebAppOpenButton = async (bot: TelegramBot, chatId: number, language: UserLanguage) => {
     const copy = getMiniAppStartCopy(language);
-    if (!miniAppWebAppOpenUrl) {
+    if (!MINI_APP_URL) {
         await bot.sendMessage(chatId, copy.noUrl);
-        return;
-    }
-    // На iOS web_app-кнопка часто открывает Mini App как нижнюю шторку.
-    // Кнопка-URL на direct link (t.me/.../app) воспроизводит поведение «Открыть» (fullscreen).
-    if (MINI_APP_TELEGRAM_LINK) {
-        await bot.sendMessage(chatId, copy.intro, {
-            reply_markup: {
-                inline_keyboard: [[{ text: copy.button, url: MINI_APP_TELEGRAM_LINK }]]
-            }
-        });
         return;
     }
 
@@ -425,14 +415,8 @@ if (!telegramBot) {
     console.warn("⚠️ TELEGRAM_BOT_TOKEN is not set. Telegram payments are disabled.");
 } else {
     registerVoiceStudioWebAppStart(telegramBot);
-    if (!miniAppWebAppOpenUrl) {
-        console.warn(
-            "⚠️ Задайте MINI_APP_TELEGRAM_LINK или MINI_APP_URL — иначе /start не покажет кнопку web_app."
-        );
-    } else if (!MINI_APP_TELEGRAM_LINK && MINI_APP_URL) {
-        console.warn(
-            "⚠️ MINI_APP_TELEGRAM_LINK не задан — web_app использует URL сайта; на iPhone часто будет нижняя шторка. Укажите direct link: https://t.me/<бот>/<app>"
-        );
+    if (!MINI_APP_URL) {
+        console.warn("⚠️ Задайте MINI_APP_URL — иначе /start не покажет кнопку web_app.");
     }
     telegramBot.onText(/^\/buy/i, async (msg: TelegramBot.Message) => {
         const chatId = msg.chat.id;
