@@ -12,6 +12,7 @@ import {
     getUserProfile,
     getUserSubscriptionTier,
     getOrCreateUser,
+    mapTelegramLanguageToSupported,
     saveGenerationHistory
 } from './quotaService';
 import { supabase } from "./quotaService";
@@ -123,7 +124,7 @@ type CreateInvoiceRequest = {
     amountStars?: number;
 };
 
-type UserLanguage = "ru" | "en";
+type UserLanguage = "ru" | "en" | "es" | "hi" | "id" | "ar";
 type UpdateUserLanguageRequest = {
     telegramId?: number;
     language?: UserLanguage;
@@ -237,6 +238,30 @@ const getSupportUiText = (
             send_error: "Не удалось отправить сообщение в поддержку. Попробуйте позже.",
             support_reply_prefix: "💬 Ответ поддержки:"
         },
+        es: {
+            rate_limited: "Demasiados mensajes. Envia no mas de 3 mensajes por minuto.",
+            sent: "Tu mensaje ha sido enviado a soporte. Te responderemos en este chat.",
+            send_error: "No se pudo enviar tu mensaje a soporte. Intentalo de nuevo mas tarde.",
+            support_reply_prefix: "💬 Respuesta de soporte:"
+        },
+        hi: {
+            rate_limited: "बहुत अधिक संदेश। कृपया प्रति मिनट 3 से अधिक संदेश न भेजें।",
+            sent: "आपका संदेश सपोर्ट को भेज दिया गया है। हम इसी चैट में जवाब देंगे।",
+            send_error: "सपोर्ट को संदेश भेजा नहीं जा सका। कृपया बाद में फिर प्रयास करें।",
+            support_reply_prefix: "💬 सपोर्ट का जवाब:"
+        },
+        id: {
+            rate_limited: "Terlalu banyak pesan. Kirim maksimal 3 pesan per menit.",
+            sent: "Pesan Anda sudah dikirim ke dukungan. Kami akan membalas di chat ini.",
+            send_error: "Gagal mengirim pesan ke dukungan. Coba lagi nanti.",
+            support_reply_prefix: "💬 Balasan dukungan:"
+        },
+        ar: {
+            rate_limited: "عدد الرسائل كبير جدا. يرجى ارسال 3 رسائل كحد اقصى في الدقيقة.",
+            sent: "تم ارسال رسالتك الى الدعم. سنرد عليك في هذه الدردشة.",
+            send_error: "تعذر ارسال رسالتك الى الدعم. حاول مرة اخرى لاحقا.",
+            support_reply_prefix: "💬 رد الدعم:"
+        },
         en: {
             rate_limited: "Too many messages. Please send no more than 3 messages per minute.",
             sent: "Your message has been sent to support. We will reply in this chat.",
@@ -247,18 +272,55 @@ const getSupportUiText = (
     return localized[language][key];
 };
 
-const getMiniAppStartCopy = (language: UserLanguage) =>
-    language === "en"
-        ? {
-              intro: "Tap the button below to open VoiceStudio.",
-              button: "Open VoiceStudio",
-              noUrl: "Mini App URL is not configured on the server. Please contact support."
-          }
-        : {
-              intro: "Нажмите кнопку ниже, чтобы открыть VoiceStudio.",
-              button: "Открыть VoiceStudio",
-              noUrl: "Адрес Mini App на сервере не задан. Напишите в поддержку."
-          };
+const normalizeDbLanguage = (value: string | null | undefined): UserLanguage => {
+    if (value === "ru" || value === "en" || value === "es" || value === "hi" || value === "id" || value === "ar") {
+        return value;
+    }
+    return "en";
+};
+
+const getMiniAppStartCopy = (language: UserLanguage) => {
+    if (language === "ru") {
+        return {
+            intro: "Нажмите кнопку ниже, чтобы открыть VoiceStudio. Если на iPhone откроется нижняя шторка, используйте стандартную кнопку Telegram «Открыть» в профиле бота для полноэкранного режима.",
+            button: "Открыть VoiceStudio",
+            noUrl: "Адрес Mini App на сервере не задан. Напишите в поддержку."
+        };
+    }
+    if (language === "es") {
+        return {
+            intro: "Pulsa el boton para abrir VoiceStudio. Si en iPhone se abre como panel inferior, usa el boton estandar Abrir de Telegram en el perfil del bot para pantalla completa.",
+            button: "Abrir VoiceStudio",
+            noUrl: "La URL de Mini App no esta configurada en el servidor. Contacta con soporte."
+        };
+    }
+    if (language === "hi") {
+        return {
+            intro: "VoiceStudio खोलने के लिए नीचे बटन दबाएं। अगर iPhone पर नीचे की शीट खुले, तो फुलस्क्रीन के लिए बॉट प्रोफाइल में Telegram का Open बटन उपयोग करें।",
+            button: "VoiceStudio खोलें",
+            noUrl: "सर्वर पर Mini App URL सेट नहीं है। कृपया सपोर्ट से संपर्क करें।"
+        };
+    }
+    if (language === "id") {
+        return {
+            intro: "Ketuk tombol di bawah untuk membuka VoiceStudio. Jika di iPhone terbuka sebagai panel bawah, gunakan tombol Open standar Telegram di profil bot untuk layar penuh.",
+            button: "Buka VoiceStudio",
+            noUrl: "URL Mini App belum dikonfigurasi di server. Hubungi dukungan."
+        };
+    }
+    if (language === "ar") {
+        return {
+            intro: "اضغط الزر بالاسفل لفتح VoiceStudio. اذا فُتح في iPhone كلوحة سفلية، استخدم زر Open القياسي في Telegram من ملف البوت لفتح شاشة كاملة.",
+            button: "افتح VoiceStudio",
+            noUrl: "لم يتم ضبط رابط Mini App على الخادم. يرجى التواصل مع الدعم."
+        };
+    }
+    return {
+        intro: "Tap the button below to open VoiceStudio. If iPhone opens it as a bottom sheet, use Telegram's standard Open button in the bot profile for fullscreen mode.",
+        button: "Open VoiceStudio",
+        noUrl: "Mini App URL is not configured on the server. Please contact support."
+    };
+};
 
 /** Inline `web_app` — на iPhone обычно ближе к открытию через «Открыть», чем кнопка в Reply Keyboard. */
 const sendVoiceStudioWebAppOpenButton = async (bot: TelegramBot, chatId: number, language: UserLanguage) => {
@@ -285,7 +347,10 @@ const registerVoiceStudioWebAppStart = (bot: TelegramBot | null) => {
             return;
         }
         const uid = from.id;
-        const userLanguage = (await getOrCreateUser(uid)).language === "en" ? "en" : "ru";
+        const languageHint = mapTelegramLanguageToSupported(from.language_code);
+        const userLanguage = normalizeDbLanguage(
+            (await getOrCreateUser(uid, from.first_name, from.username, languageHint)).language
+        );
         try {
             await sendVoiceStudioWebAppOpenButton(bot, msg.chat.id, userLanguage);
         } catch (error) {
@@ -310,7 +375,7 @@ const handleSupportBridge = async (bot: TelegramBot, msg: TelegramBot.Message): 
             return;
         }
         const userId = fromUser.id;
-        const userLanguage = (await getOrCreateUser(userId)).language === "en" ? "en" : "ru";
+        const userLanguage = normalizeDbLanguage((await getOrCreateUser(userId)).language);
         if (!canSendSupportMessage(userId)) {
             await bot.sendMessage(
                 msg.chat.id,
@@ -388,7 +453,7 @@ const handleSupportBridge = async (bot: TelegramBot, msg: TelegramBot.Message): 
         }
 
         try {
-            const targetUserLanguage = (await getOrCreateUser(targetUserId)).language === "en" ? "en" : "ru";
+            const targetUserLanguage = normalizeDbLanguage((await getOrCreateUser(targetUserId)).language);
             const responseText = `${getSupportUiText(targetUserLanguage, "support_reply_prefix")}\n\n${msg.text}`;
             const sentToUser = await bot.sendMessage(targetUserId, responseText);
             supportUserByGroupMessage.set(msg.message_id, targetUserId);
@@ -813,7 +878,14 @@ app.post("/api/user/language", async (req: Request, res: Response) => {
         if (!Number.isFinite(telegramId) || Number(telegramId) <= 0) {
             return res.status(400).json({ error: "Invalid telegramId" });
         }
-        if (language !== "ru" && language !== "en") {
+        if (
+            language !== "ru" &&
+            language !== "en" &&
+            language !== "es" &&
+            language !== "hi" &&
+            language !== "id" &&
+            language !== "ar"
+        ) {
             return res.status(400).json({ error: "Invalid language" });
         }
 

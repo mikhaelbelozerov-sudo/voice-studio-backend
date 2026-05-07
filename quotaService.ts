@@ -13,15 +13,32 @@ export type UserRecord = {
   subscription_tier: 'free' | 'pro' | 'premium';
   subscription_expires_at: string | null;
   stars_minutes: number;
-  language: 'ru' | 'en';
+  language: 'ru' | 'en' | 'es' | 'hi' | 'id' | 'ar';
   daily_minutes_used: number;
   last_reset_date: string;
 };
 
+export type SupportedLanguage = 'ru' | 'en' | 'es' | 'hi' | 'id' | 'ar';
+
+export function mapTelegramLanguageToSupported(languageCode?: string | null): SupportedLanguage {
+  const normalized = String(languageCode ?? '').toLowerCase();
+  if (normalized.startsWith('ru')) return 'ru';
+  if (normalized.startsWith('es')) return 'es';
+  if (normalized.startsWith('hi')) return 'hi';
+  if (normalized.startsWith('id') || normalized.startsWith('in')) return 'id';
+  if (normalized.startsWith('ar')) return 'ar';
+  return 'en';
+}
+
 /**
  * Получить или создать пользователя в БД по telegramId
  */
-export async function getOrCreateUser(telegramId: number, firstName?: string, username?: string): Promise<UserRecord> {
+export async function getOrCreateUser(
+  telegramId: number,
+  firstName?: string,
+  username?: string,
+  languageHint: SupportedLanguage = 'en'
+): Promise<UserRecord> {
   // Проверяем, есть ли уже такой пользователь
   const { data: existing, error: fetchError } = await supabase
     .from('users')
@@ -61,7 +78,7 @@ export async function getOrCreateUser(telegramId: number, firstName?: string, us
       first_name: firstName || '',
       username: username || '',
       subscription_tier: 'free',
-      language: 'ru',
+      language: languageHint,
       daily_minutes_used: 0,
       last_reset_date: new Date().toISOString().slice(0,10),
       stars_minutes: 0,
