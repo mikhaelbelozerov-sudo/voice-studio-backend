@@ -52,6 +52,8 @@ const TEMP_DIR = path.join(__dirname, "temp");
 
 const SUPPORT_RATE_LIMIT_WINDOW_MS = 60_000;
 const SUPPORT_RATE_LIMIT_MAX_MESSAGES = 3;
+const TTS_LANGUAGE_CODES = ["ru", "en", "es", "fr", "de", "it", "ja", "zh", "ko", "ar", "hi", "tr"] as const;
+type TtsLanguageCode = (typeof TTS_LANGUAGE_CODES)[number];
 
 type SupportContext = {
     userId: number;
@@ -888,7 +890,7 @@ app.get(["/voices", "/api/voices"], async (_req: Request, res: Response) => {
 // Генерация аудио (прямой API, без дополнительных пакетов)
 app.post("/api/generate", async (req: Request, res: Response) => {
     try {
-        const { text, voiceId, speed = 1.0, pitch = 0, telegramId } = req.body;
+        const { text, voiceId, speed = 1.0, pitch = 0, languageCode = "en", telegramId } = req.body;
 
         // Проверка обязательных полей
         if (!text || !voiceId) {
@@ -896,6 +898,10 @@ app.post("/api/generate", async (req: Request, res: Response) => {
         }
         if (!telegramId) {
             return res.status(400).json({ error: "Missing telegramId. Please login." });
+        }
+        const safeLanguageCode = String(languageCode).toLowerCase();
+        if (!(TTS_LANGUAGE_CODES as readonly string[]).includes(safeLanguageCode)) {
+            return res.status(400).json({ error: "Invalid languageCode" });
         }
 
         const parsedSpeed = Number.parseFloat(String(speed));
@@ -909,7 +915,8 @@ app.post("/api/generate", async (req: Request, res: Response) => {
             rawSpeed: speed,
             rawPitch: pitch,
             speed: safeSpeed,
-            pitch: safePitch
+            pitch: safePitch,
+            languageCode: safeLanguageCode
         });
 
         // Проверка квоты
@@ -928,7 +935,8 @@ app.post("/api/generate", async (req: Request, res: Response) => {
             },
             body: JSON.stringify({
                 text: text,
-                model_id: "eleven_turbo_v2",
+                model_id: "eleven_turbo_v2_5",
+                language_code: safeLanguageCode as TtsLanguageCode,
                 voice_settings: {
                     stability: 0.7,
                     similarity_boost: 0.7,
