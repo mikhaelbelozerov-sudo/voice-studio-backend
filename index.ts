@@ -322,6 +322,45 @@ const getMiniAppStartCopy = (language: UserLanguage) => {
     };
 };
 
+const getLanguagePromptText = (language: UserLanguage): string => {
+    if (language === "ru") return "Выберите язык интерфейса:";
+    if (language === "es") return "Elige el idioma de la interfaz:";
+    if (language === "hi") return "इंटरफेस भाषा चुनें:";
+    if (language === "id") return "Pilih bahasa antarmuka:";
+    if (language === "ar") return "اختر لغة الواجهة:";
+    return "Choose interface language:";
+};
+
+const LANGUAGE_OPTION_LABELS: Record<UserLanguage, string> = {
+    en: "English",
+    ru: "Русский",
+    es: "Espanol",
+    hi: "हिंदी",
+    id: "Bahasa Indonesia",
+    ar: "العربية"
+};
+
+const buildLanguageSelectorMarkup = (current: UserLanguage): TelegramBot.InlineKeyboardMarkup => {
+    const withMark = (code: UserLanguage) =>
+        `${current === code ? "✓ " : ""}${LANGUAGE_OPTION_LABELS[code]}`;
+    return {
+        inline_keyboard: [
+            [
+                { text: withMark("en"), callback_data: "lang:set:en" },
+                { text: withMark("ru"), callback_data: "lang:set:ru" }
+            ],
+            [
+                { text: withMark("es"), callback_data: "lang:set:es" },
+                { text: withMark("hi"), callback_data: "lang:set:hi" }
+            ],
+            [
+                { text: withMark("id"), callback_data: "lang:set:id" },
+                { text: withMark("ar"), callback_data: "lang:set:ar" }
+            ]
+        ]
+    };
+};
+
 /** Inline `web_app` — на iPhone обычно ближе к открытию через «Открыть», чем кнопка в Reply Keyboard. */
 const sendVoiceStudioWebAppOpenButton = async (bot: TelegramBot, chatId: number, language: UserLanguage) => {
     const copy = getMiniAppStartCopy(language);
@@ -352,6 +391,9 @@ const registerVoiceStudioWebAppStart = (bot: TelegramBot | null) => {
             (await getOrCreateUser(uid, from.first_name, from.username, languageHint)).language
         );
         try {
+            await bot.sendMessage(msg.chat.id, getLanguagePromptText(userLanguage), {
+                reply_markup: buildLanguageSelectorMarkup(userLanguage)
+            });
             await sendVoiceStudioWebAppOpenButton(bot, msg.chat.id, userLanguage);
         } catch (error) {
             console.error("Failed to send Mini App open button:", error);
@@ -504,7 +546,43 @@ if (!telegramBot) {
         const telegramId = query.from.id;
         const chatId = query.message?.chat.id;
         const action = query.data;
-        if (!action?.startsWith("buy:") || !chatId) {
+        if (!chatId || !action) {
+            await telegramBot.answerCallbackQuery(query.id);
+            return;
+        }
+
+        if (action.startsWith("lang:set:")) {
+            const selected = action.replace("lang:set:", "");
+            const valid: UserLanguage[] = ["en", "ru", "es", "hi", "id", "ar"];
+            if (!valid.includes(selected as UserLanguage)) {
+                await telegramBot.answerCallbackQuery(query.id, { text: "Unknown language" });
+                return;
+            }
+            const nextLang = selected as UserLanguage;
+            try {
+                await getOrCreateUser(telegramId, query.from.first_name, query.from.username, mapTelegramLanguageToSupported(query.from.language_code));
+                await supabase.from("users").update({ language: nextLang }).eq("telegram_id", telegramId);
+                if (query.message?.message_id) {
+                    await telegramBot.editMessageText(getLanguagePromptText(nextLang), {
+                        chat_id: chatId,
+                        message_id: query.message.message_id,
+                        reply_markup: buildLanguageSelectorMarkup(nextLang)
+                    });
+                }
+                await telegramBot.answerCallbackQuery(query.id, {
+                    text: LANGUAGE_OPTION_LABELS[nextLang]
+                });
+            } catch (error) {
+                console.error("Language switch from bot failed:", error);
+                await telegramBot.answerCallbackQuery(query.id, {
+                    text: "Failed to change language",
+                    show_alert: true
+                });
+            }
+            return;
+        }
+
+        if (!action.startsWith("buy:")) {
             await telegramBot.answerCallbackQuery(query.id);
             return;
         }
