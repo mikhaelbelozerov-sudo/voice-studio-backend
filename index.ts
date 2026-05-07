@@ -52,7 +52,27 @@ const TEMP_DIR = path.join(__dirname, "temp");
 
 const SUPPORT_RATE_LIMIT_WINDOW_MS = 60_000;
 const SUPPORT_RATE_LIMIT_MAX_MESSAGES = 3;
-const TTS_LANGUAGE_CODES = ["ru", "en", "es", "fr", "de", "it", "ja", "zh", "ko", "ar", "hi", "tr"] as const;
+const TTS_LANGUAGE_CODES = [
+    "en",
+    "ru",
+    "es",
+    "hi",
+    "id",
+    "ar",
+    "de",
+    "fr",
+    "it",
+    "ja",
+    "zh",
+    "ko",
+    "tr",
+    "uk",
+    "pl",
+    "pt",
+    "el",
+    "he",
+    "vi"
+] as const;
 type TtsLanguageCode = (typeof TTS_LANGUAGE_CODES)[number];
 
 type SupportContext = {
