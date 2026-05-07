@@ -151,6 +151,7 @@ const supportUserByThread = new Map<number, number>();
 const supportRootMessageByUser = new Map<number, number>();
 const supportUserByGroupMessage = new Map<number, number>();
 const supportRateLimit = new Map<number, number[]>();
+const miniAppOpenMessageByUser = new Map<number, number>();
 
 const normalizeRateWindow = (timestamps: number[], now: number) =>
     timestamps.filter((timestamp) => now - timestamp < SUPPORT_RATE_LIMIT_WINDOW_MS);
@@ -282,42 +283,42 @@ const normalizeDbLanguage = (value: string | null | undefined): UserLanguage => 
 const getMiniAppStartCopy = (language: UserLanguage) => {
     if (language === "ru") {
         return {
-            intro: "Нажмите кнопку ниже, чтобы открыть VoiceStudio. Если на iPhone откроется нижняя шторка, используйте стандартную кнопку Telegram «Открыть» в профиле бота для полноэкранного режима.",
-            button: "Открыть VoiceStudio",
+            intro: "Нажмите кнопку ниже, чтобы открыть VoiceStudio Pro. Если на iPhone откроется нижняя шторка, используйте стандартную кнопку Telegram «Открыть» в профиле бота для полноэкранного режима.",
+            button: "Открыть VoiceStudio Pro",
             noUrl: "Адрес Mini App на сервере не задан. Напишите в поддержку."
         };
     }
     if (language === "es") {
         return {
-            intro: "Pulsa el boton para abrir VoiceStudio. Si en iPhone se abre como panel inferior, usa el boton estandar Abrir de Telegram en el perfil del bot para pantalla completa.",
-            button: "Abrir VoiceStudio",
+            intro: "Pulsa el boton para abrir VoiceStudio Pro. Si en iPhone se abre como panel inferior, usa el boton estandar Abrir de Telegram en el perfil del bot para pantalla completa.",
+            button: "Abrir VoiceStudio Pro",
             noUrl: "La URL de Mini App no esta configurada en el servidor. Contacta con soporte."
         };
     }
     if (language === "hi") {
         return {
-            intro: "VoiceStudio खोलने के लिए नीचे बटन दबाएं। अगर iPhone पर नीचे की शीट खुले, तो फुलस्क्रीन के लिए बॉट प्रोफाइल में Telegram का Open बटन उपयोग करें।",
-            button: "VoiceStudio खोलें",
+            intro: "VoiceStudio Pro खोलने के लिए नीचे बटन दबाएं। अगर iPhone पर नीचे की शीट खुले, तो फुलस्क्रीन के लिए बॉट प्रोफाइल में Telegram का Open बटन उपयोग करें।",
+            button: "VoiceStudio Pro खोलें",
             noUrl: "सर्वर पर Mini App URL सेट नहीं है। कृपया सपोर्ट से संपर्क करें।"
         };
     }
     if (language === "id") {
         return {
-            intro: "Ketuk tombol di bawah untuk membuka VoiceStudio. Jika di iPhone terbuka sebagai panel bawah, gunakan tombol Open standar Telegram di profil bot untuk layar penuh.",
-            button: "Buka VoiceStudio",
+            intro: "Ketuk tombol di bawah untuk membuka VoiceStudio Pro. Jika di iPhone terbuka sebagai panel bawah, gunakan tombol Open standar Telegram di profil bot untuk layar penuh.",
+            button: "Buka VoiceStudio Pro",
             noUrl: "URL Mini App belum dikonfigurasi di server. Hubungi dukungan."
         };
     }
     if (language === "ar") {
         return {
-            intro: "اضغط الزر بالاسفل لفتح VoiceStudio. اذا فُتح في iPhone كلوحة سفلية، استخدم زر Open القياسي في Telegram من ملف البوت لفتح شاشة كاملة.",
-            button: "افتح VoiceStudio",
+            intro: "اضغط الزر بالاسفل لفتح VoiceStudio Pro. اذا فُتح في iPhone كلوحة سفلية، استخدم زر Open القياسي في Telegram من ملف البوت لفتح شاشة كاملة.",
+            button: "افتح VoiceStudio Pro",
             noUrl: "لم يتم ضبط رابط Mini App على الخادم. يرجى التواصل مع الدعم."
         };
     }
     return {
-        intro: "Tap the button below to open VoiceStudio. If iPhone opens it as a bottom sheet, use Telegram's standard Open button in the bot profile for fullscreen mode.",
-        button: "Open VoiceStudio",
+        intro: "Tap the button below to open VoiceStudio Pro. If iPhone opens it as a bottom sheet, use Telegram's standard Open button in the bot profile for fullscreen mode.",
+        button: "Open VoiceStudio Pro",
         noUrl: "Mini App URL is not configured on the server. Please contact support."
     };
 };
@@ -361,19 +362,29 @@ const buildLanguageSelectorMarkup = (current: UserLanguage): TelegramBot.InlineK
     };
 };
 
-/** Inline `web_app` — на iPhone обычно ближе к открытию через «Открыть», чем кнопка в Reply Keyboard. */
-const sendVoiceStudioWebAppOpenButton = async (bot: TelegramBot, chatId: number, language: UserLanguage) => {
-    const copy = getMiniAppStartCopy(language);
+const buildMiniAppOpenReplyMarkup = (language: UserLanguage): TelegramBot.InlineKeyboardMarkup | undefined => {
     if (!MINI_APP_URL) {
-        await bot.sendMessage(chatId, copy.noUrl);
-        return;
+        return undefined;
+    }
+    const copy = getMiniAppStartCopy(language);
+    return {
+        inline_keyboard: [[{ text: copy.button, web_app: { url: MINI_APP_URL } }]]
+    };
+};
+
+/** Inline `web_app` — на iPhone обычно ближе к открытию через «Открыть», чем кнопка в Reply Keyboard. */
+const sendVoiceStudioWebAppOpenButton = async (
+    bot: TelegramBot,
+    chatId: number,
+    language: UserLanguage
+): Promise<TelegramBot.Message> => {
+    const copy = getMiniAppStartCopy(language);
+    const replyMarkup = buildMiniAppOpenReplyMarkup(language);
+    if (!replyMarkup) {
+        return bot.sendMessage(chatId, copy.noUrl);
     }
 
-    await bot.sendMessage(chatId, copy.intro, {
-        reply_markup: {
-            inline_keyboard: [[{ text: copy.button, web_app: { url: MINI_APP_URL } }]]
-        }
-    });
+    return bot.sendMessage(chatId, copy.intro, { reply_markup: replyMarkup });
 };
 
 const registerVoiceStudioWebAppStart = (bot: TelegramBot | null) => {
@@ -394,7 +405,8 @@ const registerVoiceStudioWebAppStart = (bot: TelegramBot | null) => {
             await bot.sendMessage(msg.chat.id, getLanguagePromptText(userLanguage), {
                 reply_markup: buildLanguageSelectorMarkup(userLanguage)
             });
-            await sendVoiceStudioWebAppOpenButton(bot, msg.chat.id, userLanguage);
+            const openMessage = await sendVoiceStudioWebAppOpenButton(bot, msg.chat.id, userLanguage);
+            miniAppOpenMessageByUser.set(uid, openMessage.message_id);
         } catch (error) {
             console.error("Failed to send Mini App open button:", error);
         }
@@ -568,6 +580,20 @@ if (!telegramBot) {
                         message_id: query.message.message_id,
                         reply_markup: buildLanguageSelectorMarkup(nextLang)
                     });
+                }
+                const openMessageId = miniAppOpenMessageByUser.get(telegramId);
+                if (openMessageId) {
+                    const nextCopy = getMiniAppStartCopy(nextLang);
+                    const nextOpenMarkup = buildMiniAppOpenReplyMarkup(nextLang);
+                    try {
+                        await telegramBot.editMessageText(nextOpenMarkup ? nextCopy.intro : nextCopy.noUrl, {
+                            chat_id: chatId,
+                            message_id: openMessageId,
+                            reply_markup: nextOpenMarkup
+                        });
+                    } catch (editError) {
+                        console.warn("Failed to live-update mini app open message after language change:", editError);
+                    }
                 }
                 await telegramBot.answerCallbackQuery(query.id, {
                     text: LANGUAGE_OPTION_LABELS[nextLang]
