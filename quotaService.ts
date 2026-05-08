@@ -3,7 +3,22 @@ import fs from 'fs';
 import path from 'path';
 
 // Данные из вашего Supabase проекта (замените на свои)
-const SUPABASE_URL = process.env.SUPABASE_URL?.trim() || 'https://dhubdhpkugfvqgklxzdl.supabase.co';
+const normalizeSupabaseUrl = (raw?: string): string => {
+  const fallback = 'https://dhubdhpkugfvqgklxzdl.supabase.co';
+  const source = (raw ?? '').trim();
+  if (!source) {
+    return fallback;
+  }
+
+  let normalized = source.replace(/\/+$/, '');
+  normalized = normalized.replace(/\/rest\/v1$/i, '');
+  normalized = normalized.replace(/\/storage\/v1$/i, '');
+  normalized = normalized.replace(/\/auth\/v1$/i, '');
+
+  return normalized || fallback;
+};
+
+const SUPABASE_URL = normalizeSupabaseUrl(process.env.SUPABASE_URL);
 const SUPABASE_KEY =
   process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() ||
   process.env.SUPABASE_ANON_KEY?.trim() ||
