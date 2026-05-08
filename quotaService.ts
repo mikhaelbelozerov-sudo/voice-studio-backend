@@ -3,10 +3,60 @@ import fs from 'fs';
 import path from 'path';
 
 // Данные из вашего Supabase проекта (замените на свои)
-const SUPABASE_URL = 'https://dhubdhpkugfvqgklxzdl.supabase.co';
-const SUPABASE_ANON_KEY = 'sb_publishable_Vm5NiZck3MROCzf1YJXVAw_g8ngEcLE';
+const SUPABASE_URL = process.env.SUPABASE_URL?.trim() || 'https://dhubdhpkugfvqgklxzdl.supabase.co';
+const SUPABASE_KEY =
+  process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() ||
+  process.env.SUPABASE_ANON_KEY?.trim() ||
+  'sb_publishable_Vm5NiZck3MROCzf1YJXVAw_g8ngEcLE';
+export const SUPABASE_AUDIO_BUCKET = process.env.SUPABASE_AUDIO_BUCKET?.trim() || 'generated-audio';
 
-export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+export const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+const STORAGE_PUBLIC_PREFIX = `${SUPABASE_URL}/storage/v1/object/public/`;
+const STORAGE_SIGNED_PREFIX = `${SUPABASE_URL}/storage/v1/object/sign/`;
+
+export function getAudioPublicUrl(objectPath: string): string {
+  const normalizedPath = objectPath.replace(/^\/+/, '');
+  return `${STORAGE_PUBLIC_PREFIX}${SUPABASE_AUDIO_BUCKET}/${normalizedPath}`;
+}
+
+export function parseStorageObjectPathFromUrl(audioUrl?: string | null): string | null {
+  if (!audioUrl) {
+    return null;
+  }
+
+  const normalized = String(audioUrl).trim();
+  if (!normalized) {
+    return null;
+  }
+
+  const decodePath = (raw: string): string => {
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return raw;
+    }
+  };
+
+  if (normalized.startsWith(STORAGE_PUBLIC_PREFIX)) {
+    const withBucket = normalized.slice(STORAGE_PUBLIC_PREFIX.length);
+    if (!withBucket.startsWith(`${SUPABASE_AUDIO_BUCKET}/`)) {
+      return null;
+    }
+    return decodePath(withBucket.slice(SUPABASE_AUDIO_BUCKET.length + 1));
+  }
+
+  if (normalized.startsWith(STORAGE_SIGNED_PREFIX)) {
+    const withBucket = normalized.slice(STORAGE_SIGNED_PREFIX.length);
+    if (!withBucket.startsWith(`${SUPABASE_AUDIO_BUCKET}/`)) {
+      return null;
+    }
+    const objectPart = withBucket.slice(SUPABASE_AUDIO_BUCKET.length + 1).split('?')[0] ?? '';
+    return decodePath(objectPart);
+  }
+
+  return null;
+}
 
 export type UserRecord = {
   telegram_id: number;
@@ -327,23 +377,35 @@ export async function cleanExpiredFiles(tempDir: string): Promise<number> {
               continue;
           }
 
-          const filename = gen.audio_url?.split('/').pop();
-          if (!filename) {
-              console.warn(`⚠️ Cleanup: cannot parse filename for generation ${gen.id}, marking as deleted in DB`);
-              await supabase.from('generations').update({ file_deleted: true }).eq('id', gen.id);
-              markedDeletedWithoutFile++;
-              continue;
-          }
-
-          const filePath = path.join(tempDir, filename);
+          const objectPath = parseStorageObjectPathFromUrl(gen.audio_url);
           try {
-              if (fs.existsSync(filePath)) {
-                  fs.unlinkSync(filePath);
-                  deletedCount++;
-                  console.log(`🗑️ File deleted: ${filename} (generation ${gen.id})`);
+              if (objectPath) {
+                  const { error: deleteStorageError } = await supabase
+                    .storage
+                    .from(SUPABASE_AUDIO_BUCKET)
+                    .remove([objectPath]);
+                  if (deleteStorageError) {
+                    console.error(`Failed to delete storage object for generation ${gen.id} (${objectPath}):`, deleteStorageError);
+                  } else {
+                    deletedCount++;
+                    console.log(`🗑️ Storage object deleted: ${objectPath} (generation ${gen.id})`);
+                  }
               } else {
-                  console.warn(`⚠️ File already missing: ${filename} (generation ${gen.id}), syncing DB flag`);
-                  markedDeletedWithoutFile++;
+                  const filename = gen.audio_url?.split('/').pop();
+                  if (!filename) {
+                    console.warn(`⚠️ Cleanup: cannot parse filename for generation ${gen.id}, marking as deleted in DB`);
+                    markedDeletedWithoutFile++;
+                  } else {
+                    const filePath = path.join(tempDir, filename);
+                    if (fs.existsSync(filePath)) {
+                      fs.unlinkSync(filePath);
+                      deletedCount++;
+                      console.log(`🗑️ Local file deleted: ${filename} (generation ${gen.id})`);
+                    } else {
+                      console.warn(`⚠️ Local file already missing: ${filename} (generation ${gen.id}), syncing DB flag`);
+                      markedDeletedWithoutFile++;
+                    }
+                  }
               }
 
               const { error: updateError } = await supabase
@@ -355,7 +417,7 @@ export async function cleanExpiredFiles(tempDir: string): Promise<number> {
                   console.error(`Failed to update file_deleted for generation ${gen.id}:`, updateError);
               }
           } catch (err) {
-              console.error(`Error deleting file for generation ${gen.id} (${filename}):`, err);
+              console.error(`Error deleting file for generation ${gen.id}:`, err);
           }
       }
 

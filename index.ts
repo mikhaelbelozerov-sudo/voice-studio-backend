@@ -8,12 +8,14 @@ import {
     canGenerate,
     cleanExpiredFiles,
     consumeGeneration,
+    getAudioPublicUrl,
     getUserGenerations,
     getUserProfile,
     getUserSubscriptionTier,
     getOrCreateUser,
     mapTelegramLanguageToSupported,
-    saveGenerationHistory
+    saveGenerationHistory,
+    SUPABASE_AUDIO_BUCKET
 } from './quotaService';
 import { supabase } from "./quotaService";
 
@@ -48,7 +50,7 @@ const normalizeTelegramHttpsUrl = (raw: string): string => {
 };
 const MINI_APP_TELEGRAM_LINK = normalizeTelegramHttpsUrl(process.env.MINI_APP_TELEGRAM_LINK ?? "");
 const miniAppWebAppOpenUrl = MINI_APP_TELEGRAM_LINK || MINI_APP_URL;
-const TEMP_DIR = path.join(__dirname, "temp");
+const AUDIO_STORAGE_DIR = process.env.AUDIO_STORAGE_DIR?.trim() || process.env.RENDER_DISK_PATH?.trim() || path.join(__dirname, "temp");
 
 const SUPPORT_RATE_LIMIT_WINDOW_MS = 60_000;
 const SUPPORT_RATE_LIMIT_MAX_MESSAGES = 3;
@@ -87,14 +89,21 @@ if (!ELEVENLABS_API_KEY) {
     process.exit(1);
 }
 
-// Создание папки temp, если её нет
-if (!fs.existsSync(TEMP_DIR)) {
-    fs.mkdirSync(TEMP_DIR, { recursive: true });
+// Создание папки для аудио, если её нет
+if (!fs.existsSync(AUDIO_STORAGE_DIR)) {
+    fs.mkdirSync(AUDIO_STORAGE_DIR, { recursive: true });
 }
+
+if (process.env.RENDER && !process.env.AUDIO_STORAGE_DIR && !process.env.RENDER_DISK_PATH) {
+    console.warn(
+        "⚠️ Persistent audio storage is not configured. Set AUDIO_STORAGE_DIR (or RENDER_DISK_PATH) to Render Disk mount path to keep files available for 24 hours."
+    );
+}
+console.log(`🗂️ Audio storage bucket: ${SUPABASE_AUDIO_BUCKET}`);
 
 app.use(cors());
 app.use(express.json());
-app.use("/temp", express.static(TEMP_DIR));
+app.use("/temp", express.static(AUDIO_STORAGE_DIR));
 
 type ProductType = "minutes" | "subscription";
 type ProductConfig = {
@@ -982,12 +991,20 @@ app.post("/api/generate", async (req: Request, res: Response) => {
         const arrayBuffer = await response.arrayBuffer();
         const buffer = Buffer.from(arrayBuffer);
         const filename = `audio_${Date.now()}.mp3`;
-        const filePath = path.join(TEMP_DIR, filename);
-        fs.writeFileSync(filePath, buffer);
-
-        const protocol = req.headers['x-forwarded-proto'] || req.protocol;
-        const host = req.get('host');
-        const audioUrl = `${protocol}://${host}/temp/${filename}`;
+        const objectPath = `${telegramId}/${filename}`;
+        const { error: uploadError } = await supabase
+            .storage
+            .from(SUPABASE_AUDIO_BUCKET)
+            .upload(objectPath, buffer, {
+                contentType: "audio/mpeg",
+                upsert: false
+            });
+        if (uploadError) {
+            throw new Error(
+                `Failed to upload audio to Supabase Storage bucket "${SUPABASE_AUDIO_BUCKET}". ${uploadError.message}`
+            );
+        }
+        const audioUrl = getAudioPublicUrl(objectPath);
 
         // Списать квоту и сохранить историю
         await consumeGeneration(telegramId);
@@ -1085,7 +1102,7 @@ const CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const runExpiredFilesCleanup = async () => {
     try {
         console.log("🧹 Running expired files cleanup...");
-        const removedCount = await cleanExpiredFiles(TEMP_DIR);
+        const removedCount = await cleanExpiredFiles(AUDIO_STORAGE_DIR);
         console.log(`🧹 Cleanup completed. Removed files: ${removedCount}`);
     } catch (error) {
         console.error("❌ Expired files cleanup failed:", error);
