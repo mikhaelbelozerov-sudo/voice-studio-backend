@@ -5,9 +5,21 @@ import fs from "fs";
 import TelegramBot from "node-telegram-bot-api";
 import path from "path";
 import {
-    canGenerate,
+    assertCanGenerate,
+    applyRetentionOnProfileOpen,
+    chargeAfterSuccessfulGeneration,
+    endGeneration,
+    fetchBillingUser,
+    FIRST_PAYMENT_BONUS_CREDITS,
+    INVITE_BONUS_CREDITS,
+    logAnalyticsEvent,
+    markFirstGenerationIfNeeded,
+    PRO_MONTHLY_CREDIT_GRANT,
+    tryBeginGeneration
+} from "./creditEconomy";
+
+import {
     cleanExpiredFiles,
-    consumeGeneration,
     getAudioPublicUrl,
     getUserGenerations,
     getUserProfile,
@@ -16,8 +28,8 @@ import {
     mapTelegramLanguageToSupported,
     saveGenerationHistory,
     SUPABASE_AUDIO_BUCKET
-} from './quotaService';
-import { supabase } from "./quotaService";
+} from "./quotaService";
+import { supabase } from "./supabaseClient";
 
 dotenv.config();
 
@@ -105,9 +117,11 @@ app.use(cors());
 app.use(express.json());
 app.use("/temp", express.static(AUDIO_STORAGE_DIR));
 
-type ProductType = "minutes" | "subscription";
+type ProductType = "credits" | "subscription";
 type ProductConfig = {
+    catalogKey: string;
     productType: ProductType;
+    /** Credits granted (1 credit ~= 1s of studio time) OR subscription tier sentinel */
     productValue: number;
     amount: number;
     title: string;
@@ -116,31 +130,52 @@ type ProductConfig = {
 };
 
 const PRODUCT_CATALOG: Record<string, ProductConfig> = {
-    "minutes_100": {
-        productType: "minutes",
-        productValue: 100,
-        amount: 50,
-        title: "100 минут VoiceStudio",
-        description: "Пакет из 100 дополнительных минут генерации",
-        label: "100 минут"
+    credits_10m: {
+        catalogKey: "credits_10m",
+        productType: "credits",
+        productValue: 10 * 60,
+        amount: 39,
+        title: "VoiceStudio Pro — 10 min studio time",
+        description: "+10 minutes of narration credits (~600 credits). Creator-friendly top-up.",
+        label: "+10 min"
     },
-    "pro_30d": {
-        productType: "subscription",
-        productValue: 1,
-        amount: 100,
-        title: "Pro подписка на 30 дней",
-        description: "Безлимитная генерация + хранение файлов до 30 дней",
-        label: "Pro 30 дней"
+    credits_35m: {
+        catalogKey: "credits_35m",
+        productType: "credits",
+        productValue: 35 * 60,
+        amount: 99,
+        title: "VoiceStudio Pro — 35 min bundle",
+        description: "+35 minutes of narration credits (~2100 credits). Best for weekly content.",
+        label: "+35 min"
     },
-    "premium_30d": {
+    credits_120m: {
+        catalogKey: "credits_120m",
+        productType: "credits",
+        productValue: 120 * 60,
+        amount: 249,
+        title: "VoiceStudio Pro — 120 min booster",
+        description: "+120 minutes of narration credits (~7200 credits). Power batch for creators.",
+        label: "+120 min"
+    },
+    pro_creator_30d: {
+        catalogKey: "pro_creator_30d",
         productType: "subscription",
-        productValue: 2,
-        amount: 200,
-        title: "Premium подписка на 30 дней",
-        description: "Максимальный тариф и бессрочное хранение файлов",
-        label: "Premium 30 дней"
+        productValue: 3,
+        amount: Number(process.env.PRO_CREATOR_STARS_PRICE ?? "650"),
+        title: "Pro Creator · 30 days",
+        description: `${Math.floor(PRO_MONTHLY_CREDIT_GRANT / 60)} monthly narration minutes, faster queue & longer scripts.`,
+        label: "Pro Creator 30d"
     }
 };
+
+const isAuthorizedProductPurchase = (
+    productType: ProductType,
+    productValue: number,
+    amountStars: number
+): boolean =>
+    Object.values(PRODUCT_CATALOG).some(
+        (p) => p.productType === productType && p.productValue === productValue && p.amount === amountStars
+    );
 
 const addDaysToDate = (baseDate: Date, days: number) => {
     const nextDate = new Date(baseDate);
@@ -150,7 +185,7 @@ const addDaysToDate = (baseDate: Date, days: number) => {
 
 type CreateInvoiceRequest = {
     telegramId?: number;
-    productType?: ProductType;
+    productType?: ProductType | "minutes";
     productValue?: number;
     amountStars?: number;
 };
@@ -571,12 +606,13 @@ if (!telegramBot) {
     telegramBot.onText(/^\/buy/i, async (msg: TelegramBot.Message) => {
         const chatId = msg.chat.id;
         try {
-            await telegramBot.sendMessage(chatId, "Выберите продукт для оплаты Telegram Stars:", {
+            await telegramBot.sendMessage(chatId, "Пополните студийные минуты звёздами или возьмите Pro Creator:", {
                 reply_markup: {
                     inline_keyboard: [
-                        [{ text: "100 минут = 50 ⭐️", callback_data: "buy:minutes_100" }],
-                        [{ text: "Pro 30 дней = 100 ⭐️", callback_data: "buy:pro_30d" }],
-                        [{ text: "Premium 30 дней = 200 ⭐️", callback_data: "buy:premium_30d" }]
+                        [{ text: "+10 мин • 39⭐️", callback_data: "buy:credits_10m" }],
+                        [{ text: "+35 мин • 99⭐️", callback_data: "buy:credits_35m" }],
+                        [{ text: "+120 мин • 249⭐️", callback_data: "buy:credits_120m" }],
+                        [{ text: "Pro Creator • 30 дней", callback_data: "buy:pro_creator_30d" }]
                     ]
                 }
             });
@@ -739,27 +775,51 @@ if (!telegramBot) {
                 }]);
 
                 const user = await getOrCreateUser(telegramId);
+                const productType = String(invoice.product_type);
+                const wasFirstPaidEver = !(user as { first_paid_at?: string | null }).first_paid_at;
 
-                if (invoice.product_type === "minutes") {
-                    const nextMinutes = (user.stars_minutes ?? 0) + Number(invoice.product_value);
-                    await supabase
-                        .from("users")
-                        .update({ stars_minutes: nextMinutes })
-                        .eq("telegram_id", telegramId);
-                } else if (invoice.product_type === "subscription") {
-                    const nextTier = Number(invoice.product_value) === 2 ? "premium" : "pro";
-                    const currentExpiry = user.subscription_expires_at ? new Date(user.subscription_expires_at) : null;
-                    const now = new Date();
-                    const startDate = currentExpiry && currentExpiry.getTime() > now.getTime() ? currentExpiry : now;
-                    const nextExpiry = addDaysToDate(startDate, 30);
-
+                if (productType === "credits" || productType === "minutes") {
+                    const creditsToAdd = productType === "minutes"
+                        ? Number(invoice.product_value) * 60
+                        : Number(invoice.product_value);
+                    let nextBalance =
+                        ((user as { credit_balance?: number }).credit_balance ?? 0) + creditsToAdd;
+                    if (wasFirstPaidEver) {
+                        nextBalance += FIRST_PAYMENT_BONUS_CREDITS;
+                    }
                     await supabase
                         .from("users")
                         .update({
-                            subscription_tier: nextTier,
-                            subscription_expires_at: nextExpiry.toISOString()
+                            credit_balance: nextBalance,
+                            ...(wasFirstPaidEver ? { first_paid_at: new Date().toISOString() } : {})
                         })
                         .eq("telegram_id", telegramId);
+                    void logAnalyticsEvent(telegramId, "topup_paid", {
+                        credits: creditsToAdd,
+                        firstPaymentBonus: wasFirstPaidEver ? FIRST_PAYMENT_BONUS_CREDITS : 0
+                    });
+                } else if (productType === "subscription") {
+                    const now = new Date();
+                    const currentExpiry = user.subscription_expires_at ? new Date(user.subscription_expires_at) : null;
+                    const startDate = currentExpiry && currentExpiry.getTime() > now.getTime() ? currentExpiry : now;
+                    const nextExpiry = addDaysToDate(startDate, 30);
+                    const nextSubCredits = (user as { subscription_credit_balance?: number }).subscription_credit_balance ?? 0;
+                    let wallet = (user as { credit_balance?: number }).credit_balance ?? 0;
+                    if (wasFirstPaidEver) {
+                        wallet += FIRST_PAYMENT_BONUS_CREDITS;
+                    }
+                    await supabase
+                        .from("users")
+                        .update({
+                            subscription_tier: "pro",
+                            subscription_expires_at: nextExpiry.toISOString(),
+                            subscription_credit_balance: nextSubCredits + PRO_MONTHLY_CREDIT_GRANT,
+                            subscription_credits_reset_at: nextExpiry.toISOString(),
+                            credit_balance: wallet,
+                            ...(wasFirstPaidEver ? { first_paid_at: new Date().toISOString() } : {})
+                        })
+                        .eq("telegram_id", telegramId);
+                    void logAnalyticsEvent(telegramId, "subscription_purchased", { tier: "pro_creator" });
                 }
 
                 await telegramBot.sendMessage(msg.chat.id, "Оплата прошла успешно! Доступ обновлён.");
@@ -826,7 +886,11 @@ app.post("/api/create-invoice", async (req: Request, res: Response) => {
             return res.status(400).json({ error: "Invalid telegramId" });
         }
 
-        if (productType !== "minutes" && productType !== "subscription") {
+        if ((productType as string) === "minutes") {
+            return res.status(400).json({ error: "Legacy pack no longer available. Use credit top-ups." });
+        }
+
+        if (productType !== "credits" && productType !== "subscription") {
             return res.status(400).json({ error: "Invalid productType" });
         }
 
@@ -841,14 +905,31 @@ app.post("/api/create-invoice", async (req: Request, res: Response) => {
         const safeTelegramId = Number(telegramId);
         const safeProductValue = Number(productValue);
         const safeAmountStars = Number(amountStars);
-        const payloadPrefix = productType === "minutes" ? "min" : "sub";
-        const payload = `${payloadPrefix}_${Date.now()}_${safeTelegramId}`;
+
+        if (!isAuthorizedProductPurchase(productType as ProductType, safeProductValue, safeAmountStars)) {
+            return res.status(400).json({ error: "Invalid Stars amount for this pack" });
+        }
+
+        const payloadPrefix = productType === "credits" ? "credit" : "sub";
+        const payload = `${payloadPrefix}_${Date.now()}_${safeTelegramId}_${Math.floor(Math.random() * 1e6)}`;
+
+        const catalogEntry =
+            Object.values(PRODUCT_CATALOG).find(
+                (p) =>
+                    p.productType === productType &&
+                    p.productValue === safeProductValue &&
+                    p.amount === safeAmountStars
+            ) ?? null;
+
+        if (!catalogEntry) {
+            return res.status(400).json({ error: "Unknown catalog item" });
+        }
 
         const { error } = await supabase.from("stars_invoices").insert([{
             id: payload,
             telegram_id: safeTelegramId,
             amount: safeAmountStars,
-            product_type: productType,
+            product_type: productType === "subscription" ? "subscription" : "credits",
             product_value: safeProductValue,
             status: "pending"
         }]);
@@ -861,30 +942,13 @@ app.post("/api/create-invoice", async (req: Request, res: Response) => {
             return res.status(503).json({ error: "Telegram bot is not configured" });
         }
 
-        const title =
-            productType === "minutes"
-                ? `${safeProductValue} минут VoiceStudio`
-                : safeProductValue === 2
-                    ? "Premium подписка на 30 дней"
-                    : "Pro подписка на 30 дней";
-        const description =
-            productType === "minutes"
-                ? `Пакет из ${safeProductValue} дополнительных минут генерации`
-                : "Оплата подписки VoiceStudio Pro";
-        const label =
-            productType === "minutes"
-                ? `${safeProductValue} минут`
-                : safeProductValue === 2
-                    ? "Premium 30 дней"
-                    : "Pro 30 дней";
-
         const invoiceLink = await telegramBot.createInvoiceLink(
-            title,
-            description,
+            catalogEntry.title,
+            catalogEntry.description,
             payload,
             "",
             "XTR",
-            [{ label, amount: safeAmountStars }]
+            [{ label: catalogEntry.label, amount: safeAmountStars }]
         );
 
         return res.json({
@@ -897,6 +961,60 @@ app.post("/api/create-invoice", async (req: Request, res: Response) => {
         return res.status(500).json({ error: err.message ?? "Failed to create invoice" });
     }
 });
+
+const CREATOR_VOICE_PRESETS = {
+    tiktok_story: {
+        speed: 1.08,
+        pitch: 0.06,
+        stability: 0.45,
+        similarity: 0.78,
+        format: (t: string) => t.trim()
+    },
+    youtube_documentary: {
+        speed: 0.95,
+        pitch: -0.04,
+        stability: 0.62,
+        similarity: 0.82,
+        format: (t: string) => t.replace(/\n+/g, " ").trim()
+    },
+    luxury_ad: {
+        speed: 0.9,
+        pitch: -0.08,
+        stability: 0.55,
+        similarity: 0.85,
+        format: (t: string) => t.replace(/\./g, ".\n\n").trim()
+    },
+    podcast: {
+        speed: 1.0,
+        pitch: 0.0,
+        stability: 0.58,
+        similarity: 0.8,
+        format: (t: string) => t.replace(/\n+/g, "\n\n").trim()
+    },
+    motivational: {
+        speed: 1.1,
+        pitch: 0.12,
+        stability: 0.42,
+        similarity: 0.74,
+        format: (t: string) => t.trim()
+    },
+    cinematic_trailer: {
+        speed: 0.88,
+        pitch: -0.12,
+        stability: 0.52,
+        similarity: 0.8,
+        format: (t: string) => t.replace(/\./g, ".\n").trim()
+    }
+} satisfies Record<
+    string,
+    {
+        speed: number;
+        pitch: number;
+        stability: number;
+        similarity: number;
+        format: (t: string) => string;
+    }
+>;
 
 // Получение списка голосов
 app.get(["/voices", "/api/voices"], async (_req: Request, res: Response) => {
@@ -918,43 +1036,104 @@ app.get(["/voices", "/api/voices"], async (_req: Request, res: Response) => {
 
 // Генерация аудио (прямой API, без дополнительных пакетов)
 app.post("/api/generate", async (req: Request, res: Response) => {
+    let activeQueueUser: number | null = null;
+    let generationCommitted = false;
     try {
-        const { text, voiceId, speed = 1.0, pitch = 0, languageCode = "en", telegramId } = req.body;
+        const {
+            text,
+            voiceId,
+            speed = 1.0,
+            pitch = 0,
+            languageCode = "en",
+            telegramId,
+            presetId
+        } = req.body;
 
-        // Проверка обязательных полей
         if (!text || !voiceId) {
             return res.status(400).json({ error: "Missing text or voiceId" });
         }
         if (!telegramId) {
             return res.status(400).json({ error: "Missing telegramId. Please login." });
         }
-        const safeLanguageCode = String(languageCode).toLowerCase();
-        if (!(TTS_LANGUAGE_CODES as readonly string[]).includes(safeLanguageCode)) {
-            return res.status(400).json({ error: "Invalid languageCode" });
+
+        const safeTelegramId = Number(telegramId);
+        if (!tryBeginGeneration(safeTelegramId)) {
+            return res.status(429).json({
+                error: "Another render is in progress. Wait a moment.",
+                code: "queue_busy"
+            });
+        }
+        activeQueueUser = safeTelegramId;
+
+        const preset =
+            presetId && typeof presetId === "string" ? CREATOR_VOICE_PRESETS[presetId as keyof typeof CREATOR_VOICE_PRESETS] : null;
+        let ttsText = String(text);
+        let parsedSpeed = Number.parseFloat(String(speed));
+        let parsedPitch = Number.parseFloat(String(pitch));
+        let stabilitySetting = 0.7;
+        let similaritySetting = 0.7;
+
+        if (preset) {
+            ttsText = preset.format(ttsText);
+            parsedSpeed = preset.speed;
+            parsedPitch = preset.pitch;
+            stabilitySetting = preset.stability;
+            similaritySetting = preset.similarity;
         }
 
-        const parsedSpeed = Number.parseFloat(String(speed));
-        const parsedPitch = Number.parseFloat(String(pitch));
         const safeSpeed = Number.isFinite(parsedSpeed) ? Math.min(Math.max(parsedSpeed, 0.7), 1.2) : 1.0;
         const safePitch = Number.isFinite(parsedPitch) ? Math.min(Math.max(parsedPitch, -1.0), 1.0) : 0;
 
-        console.log("🎛️ Voice settings received:", {
-            telegramId,
+        const safeLanguageCode = String(languageCode).toLowerCase();
+        if (!(TTS_LANGUAGE_CODES as readonly string[]).includes(safeLanguageCode)) {
+            endGeneration(safeTelegramId);
+            activeQueueUser = null;
+            return res.status(400).json({ error: "Invalid languageCode" });
+        }
+
+        console.log("🎛️ Voice settings:", {
+            telegramId: safeTelegramId,
             voiceId,
-            rawSpeed: speed,
-            rawPitch: pitch,
+            presetId,
             speed: safeSpeed,
             pitch: safePitch,
             languageCode: safeLanguageCode
         });
 
-        // Проверка квоты
-        const canGen = await canGenerate(telegramId);
-        if (!canGen) {
-            return res.status(403).json({ error: "Daily limit reached. Upgrade to Pro for unlimited generations." });
+        const gate = await assertCanGenerate({
+            telegramId: safeTelegramId,
+            text: ttsText,
+            voiceId: String(voiceId),
+            speed: safeSpeed
+        });
+
+        if (!gate.ok) {
+            const statusCode =
+                gate.code === "script_too_long"
+                    ? 400
+                    : gate.code === "cooldown" || gate.code === "duplicate"
+                      ? 429
+                      : 402;
+            void logAnalyticsEvent(safeTelegramId, "generation_blocked", {
+                code: gate.code,
+                credits: gate.creditsRequired
+            });
+            endGeneration(safeTelegramId);
+            activeQueueUser = null;
+            return res.status(statusCode).json({
+                error: gate.message,
+                code: gate.code,
+                creditsRequired: gate.creditsRequired,
+                creditsShortfall: gate.creditsShortfall ?? null,
+                secondsShortfall: gate.secondsShortfall ?? null
+            });
         }
 
-        // Генерация аудио через ElevenLabs (как у вас уже реализовано)
+        void logAnalyticsEvent(safeTelegramId, "generation_started", {
+            credits: gate.creditsRequired,
+            source: gate.source
+        });
+
         const apiKey = process.env.ELEVENLABS_API_KEY;
         const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
             method: "POST",
@@ -963,12 +1142,12 @@ app.post("/api/generate", async (req: Request, res: Response) => {
                 "xi-api-key": apiKey!
             },
             body: JSON.stringify({
-                text: text,
+                text: ttsText,
                 model_id: "eleven_turbo_v2_5",
                 language_code: safeLanguageCode as TtsLanguageCode,
                 voice_settings: {
-                    stability: 0.7,
-                    similarity_boost: 0.7,
+                    stability: stabilitySetting,
+                    similarity_boost: similaritySetting,
                     speed: safeSpeed,
                     pitch: safePitch
                 }
@@ -980,7 +1159,7 @@ app.post("/api/generate", async (req: Request, res: Response) => {
             console.error("❌ ElevenLabs generation failed", {
                 status: response.status,
                 voiceId,
-                telegramId,
+                telegramId: safeTelegramId,
                 speed: safeSpeed,
                 pitch: safePitch,
                 errorText
@@ -991,7 +1170,7 @@ app.post("/api/generate", async (req: Request, res: Response) => {
         const arrayBuffer = await response.arrayBuffer();
         const buffer = Buffer.from(arrayBuffer);
         const filename = `audio_${Date.now()}.mp3`;
-        const objectPath = `${telegramId}/${filename}`;
+        const objectPath = `${safeTelegramId}/${filename}`;
         const { error: uploadError } = await supabase
             .storage
             .from(SUPABASE_AUDIO_BUCKET)
@@ -1006,17 +1185,116 @@ app.post("/api/generate", async (req: Request, res: Response) => {
         }
         const audioUrl = getAudioPublicUrl(objectPath);
 
-        // Списать квоту и сохранить историю
-        await consumeGeneration(telegramId);
-        await saveGenerationHistory(telegramId, text, voiceId, audioUrl);
+        await chargeAfterSuccessfulGeneration({
+            telegramId: safeTelegramId,
+            text: ttsText,
+            voiceId: String(voiceId),
+            speed: safeSpeed,
+            source: gate.source,
+            creditsRequired: gate.creditsRequired,
+            estimatedSeconds: gate.estimatedSeconds
+        });
 
-        res.json({ audioUrl, status: "completed" });
+        await saveGenerationHistory(safeTelegramId, text, voiceId, audioUrl);
+        await markFirstGenerationIfNeeded(safeTelegramId);
+
+        void logAnalyticsEvent(safeTelegramId, "generation_completed", {
+            creditsCharged: gate.creditsRequired,
+            source: gate.source
+        });
+
+        generationCommitted = true;
+        endGeneration(safeTelegramId);
+        activeQueueUser = null;
+
+        res.json({
+            audioUrl,
+            status: "completed",
+            creditsCharged: gate.creditsRequired,
+            estimatedSeconds: gate.estimatedSeconds,
+            presetApplied: presetId ?? null,
+            hints: {
+                showSoftUpsell: true
+            }
+        });
     } catch (err: any) {
         console.error("Generation error:", {
             message: err?.message,
             stack: err?.stack
         });
+        if (!generationCommitted && activeQueueUser !== null) {
+            endGeneration(activeQueueUser);
+        }
+        void logAnalyticsEvent(Number(req.body.telegramId ?? 0) || 0, "generation_failed", {
+            message: err?.message ?? "unknown"
+        });
         res.status(500).json({ error: err.message });
+    }
+});
+
+app.post("/api/analytics/events", async (req: Request, res: Response) => {
+    try {
+        const { telegramId, event, props } = req.body ?? {};
+        if (!Number.isFinite(Number(telegramId)) || Number(telegramId) <= 0 || typeof event !== "string") {
+            return res.status(400).json({ error: "Invalid payload" });
+        }
+        await logAnalyticsEvent(Number(telegramId), event, props && typeof props === "object" ? props : {});
+        return res.sendStatus(204);
+    } catch (err: any) {
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+app.post("/api/referrals/claim", async (req: Request, res: Response) => {
+    try {
+        const inviteeTelegramId = Number((req.body as { inviteeTelegramId?: unknown }).inviteeTelegramId);
+        const referrerTelegramId = Number((req.body as { referrerTelegramId?: unknown }).referrerTelegramId);
+        if (
+            !Number.isFinite(inviteeTelegramId) ||
+            inviteeTelegramId <= 0 ||
+            !Number.isFinite(referrerTelegramId) ||
+            referrerTelegramId <= 0 ||
+            inviteeTelegramId === referrerTelegramId
+        ) {
+            return res.status(400).json({ error: "Invalid referral ids" });
+        }
+
+        const { data: dup, error: dupError } = await supabase
+            .from("referrals")
+            .select("id")
+            .eq("invitee_telegram_id", inviteeTelegramId)
+            .maybeSingle();
+
+        if (dupError && dupError.code !== "PGRST116") {
+            return res.status(500).json({ error: dupError.message });
+        }
+        if (dup) {
+            return res.json({ ok: true, alreadyClaimed: true });
+        }
+
+        const { error: insertError } = await supabase.from("referrals").insert([
+            {
+                referrer_telegram_id: referrerTelegramId,
+                invitee_telegram_id: inviteeTelegramId
+            }
+        ]);
+
+        if (insertError) {
+            return res.status(500).json({ error: insertError.message });
+        }
+
+        const inviter = await fetchBillingUser(referrerTelegramId);
+        if (inviter) {
+            await supabase
+                .from("users")
+                .update({ credit_balance: (inviter.credit_balance ?? 0) + INVITE_BONUS_CREDITS })
+                .eq("telegram_id", referrerTelegramId);
+        }
+
+        void logAnalyticsEvent(referrerTelegramId, "referral_claimed", { invitee: inviteeTelegramId });
+        return res.json({ ok: true, bonusCredits: INVITE_BONUS_CREDITS });
+    } catch (err: any) {
+        return res.status(500).json({ error: err.message ?? "Referral failed" });
     }
 });
 
@@ -1089,6 +1367,7 @@ app.get("/api/user/profile", async (req: Request, res: Response) => {
             return res.status(400).json({ error: "Invalid or missing telegramId" });
         }
 
+        await applyRetentionOnProfileOpen(telegramId);
         const profile = await getUserProfile(telegramId);
         return res.json(profile);
     } catch (err: any) {

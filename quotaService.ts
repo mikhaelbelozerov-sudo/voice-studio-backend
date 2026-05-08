@@ -1,31 +1,14 @@
-import { createClient } from '@supabase/supabase-js';
 import fs from 'fs';
 import path from 'path';
 
-// Данные из вашего Supabase проекта (замените на свои)
-const normalizeSupabaseUrl = (raw?: string): string => {
-  const fallback = 'https://dhubdhpkugfvqgklxzdl.supabase.co';
-  const source = (raw ?? '').trim();
-  if (!source) {
-    return fallback;
-  }
+import {
+  FREE_DAILY_REQUEST_CAP,
+  FREE_LIFETIME_SECONDS_CAP,
+  FREE_MAX_GENERATIONS
+} from './creditEconomy';
+import { supabase, SUPABASE_URL } from './supabaseClient';
 
-  let normalized = source.replace(/\/+$/, '');
-  normalized = normalized.replace(/\/rest\/v1$/i, '');
-  normalized = normalized.replace(/\/storage\/v1$/i, '');
-  normalized = normalized.replace(/\/auth\/v1$/i, '');
-
-  return normalized || fallback;
-};
-
-const SUPABASE_URL = normalizeSupabaseUrl(process.env.SUPABASE_URL);
-const SUPABASE_KEY =
-  process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() ||
-  process.env.SUPABASE_ANON_KEY?.trim() ||
-  'sb_publishable_Vm5NiZck3MROCzf1YJXVAw_g8ngEcLE';
 export const SUPABASE_AUDIO_BUCKET = process.env.SUPABASE_AUDIO_BUCKET?.trim() || 'generated-audio';
-
-export const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 const STORAGE_PUBLIC_PREFIX = `${SUPABASE_URL}/storage/v1/object/public/`;
 const STORAGE_SIGNED_PREFIX = `${SUPABASE_URL}/storage/v1/object/sign/`;
@@ -78,6 +61,9 @@ export type UserRecord = {
   subscription_tier: 'free' | 'pro' | 'premium';
   subscription_expires_at: string | null;
   stars_minutes: number;
+  credit_balance?: number | null;
+  subscription_credit_balance?: number | null;
+  subscription_credits_reset_at?: string | null;
   language: 'ru' | 'en' | 'es' | 'hi' | 'id' | 'ar';
   daily_minutes_used: number;
   last_reset_date: string;
@@ -147,7 +133,14 @@ export async function getOrCreateUser(
       daily_minutes_used: 0,
       last_reset_date: new Date().toISOString().slice(0,10),
       stars_minutes: 0,
-      subscription_expires_at: null
+      subscription_expires_at: null,
+      credit_balance: 0,
+      subscription_credit_balance: 0,
+      subscription_credits_reset_at: null,
+      free_seconds_used: 0,
+      free_generation_count: 0,
+      daily_gen_count: 0,
+      daily_gen_date: new Date().toISOString().slice(0, 10)
     }])
     .select()
     .single();
@@ -161,11 +154,7 @@ export async function getOrCreateUser(
   } as UserRecord;
 }
 
-/**
- * Проверить, может ли пользователь генерировать ещё (не превысил лимит)
- * Для free тарифа — 3 минуты в день (или 3 генерации, зависит от того, что вы хотите)
- * Здесь считаем по количеству генераций (1 генерация = 1 минута, упрощённо)
- */
+/** @deprecated Use creditEconomy gate in /generate */
 export function isSubscriptionActive(user: Pick<UserRecord, 'subscription_tier' | 'subscription_expires_at'>): boolean {
   if (user.subscription_tier === 'premium') {
     return true;
@@ -174,49 +163,6 @@ export function isSubscriptionActive(user: Pick<UserRecord, 'subscription_tier' 
     return false;
   }
   return new Date(user.subscription_expires_at).getTime() > Date.now();
-}
-
-export async function canGenerate(telegramId: number): Promise<boolean> {
-  const user = await getOrCreateUser(telegramId);
-
-  if (isSubscriptionActive(user)) {
-    return true;
-  }
-
-  if ((user.stars_minutes ?? 0) > 0) {
-    return true;
-  }
-
-  return user.daily_minutes_used < 3;
-}
-
-/**
- * Списать одну генерацию (увеличить счётчик daily_minutes_used)
- */
-export async function consumeGeneration(telegramId: number) {
-  const user = await getOrCreateUser(telegramId);
-
-  if (isSubscriptionActive(user)) {
-    return;
-  }
-
-  let error = null;
-  if ((user.stars_minutes ?? 0) > 0) {
-    const result = await supabase
-      .from('users')
-      .update({ stars_minutes: Math.max((user.stars_minutes ?? 0) - 1, 0) })
-      .eq('telegram_id', telegramId);
-    error = result.error;
-  } else {
-    const newCount = user.daily_minutes_used + 1;
-    const result = await supabase
-      .from('users')
-      .update({ daily_minutes_used: newCount })
-      .eq('telegram_id', telegramId);
-    error = result.error;
-  }
-
-  if (error) throw error;
 }
 
 /**
@@ -255,7 +201,17 @@ export type UserProfile = {
   subscription_tier: SubscriptionTier;
   subscription_expires_at: string | null;
   stars_minutes: number;
-  language: 'ru' | 'en';
+  credit_balance: number;
+  credit_balance_approx_minutes: number;
+  subscription_credit_balance: number;
+  subscription_credit_approx_minutes: number;
+  free_seconds_used: number;
+  free_generation_count: number;
+  free_seconds_cap: number;
+  free_generation_cap: number;
+  daily_gen_cap: number;
+  daily_gen_used: number;
+  language: SupportedLanguage;
 };
 
 export async function getUserSubscriptionTier(telegramId: number): Promise<SubscriptionTier> {
@@ -279,11 +235,35 @@ export async function getUserSubscriptionTier(telegramId: number): Promise<Subsc
 
 export async function getUserProfile(telegramId: number): Promise<UserProfile> {
   const user = await getOrCreateUser(telegramId);
+  const creditBalance = Number((user as unknown as { credit_balance?: number }).credit_balance ?? 0);
+  const subCredits = Number((user as unknown as { subscription_credit_balance?: number }).subscription_credit_balance ?? 0);
+  const freeSecs = Number((user as unknown as { free_seconds_used?: number }).free_seconds_used ?? 0);
+  const freeGens = Number((user as unknown as { free_generation_count?: number }).free_generation_count ?? 0);
+  const dailyUsed = Number((user as unknown as { daily_gen_count?: number }).daily_gen_count ?? 0);
+
   return {
     subscription_tier: user.subscription_tier ?? 'free',
     subscription_expires_at: user.subscription_expires_at ?? null,
     stars_minutes: user.stars_minutes ?? 0,
-    language: (user.language === 'en' ? 'en' : 'ru')
+    credit_balance: creditBalance,
+    credit_balance_approx_minutes: Math.floor(creditBalance / 60),
+    subscription_credit_balance: subCredits,
+    subscription_credit_approx_minutes: Math.floor(subCredits / 60),
+    free_seconds_used: freeSecs,
+    free_generation_count: freeGens,
+    free_seconds_cap: FREE_LIFETIME_SECONDS_CAP,
+    free_generation_cap: FREE_MAX_GENERATIONS,
+    daily_gen_cap: FREE_DAILY_REQUEST_CAP,
+    daily_gen_used: dailyUsed,
+    language:
+      user.language === 'ru' ||
+      user.language === 'en' ||
+      user.language === 'es' ||
+      user.language === 'hi' ||
+      user.language === 'id' ||
+      user.language === 'ar'
+        ? user.language
+        : 'en'
   };
 }
 
