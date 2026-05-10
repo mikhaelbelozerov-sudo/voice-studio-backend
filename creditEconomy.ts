@@ -1,33 +1,31 @@
 import crypto from "crypto";
 import { supabase } from "./supabaseClient";
 
-/** 1 second of output ≈ 1 credit (MVP heuristic, tuned from text length). */
+/** 1 second of estimated output = 1 credit (MVP; no premium markup — quality preview for all). */
 export const CREDITS_PER_UNIT_SECOND = 1;
 
 export const FREE_LIFETIME_SECONDS_CAP = 60;
 export const FREE_MAX_GENERATIONS = 3;
 export const FREE_DAILY_REQUEST_CAP = 5;
 
-export const COOLDOWN_MS_FREE_AND_TOPUP = 45_000;
-export const COOLDOWN_MS_PRO = 12_000;
+/** Free & wallet users — spec: 15s between generations. */
+export const COOLDOWN_MS_FREE_AND_TOPUP = 15_000;
+/** Pro Beta — faster queue. */
+export const COOLDOWN_MS_PRO = 10_000;
 
-export const DUPLICATE_WINDOW_MS = 120_000;
+export const DUPLICATE_WINDOW_MS = 90_000;
 
-export const PRO_MONTHLY_CREDIT_GRANT = 100 * 60; // 100 "minutes" ≈ 6000 credits
-export const FIRST_PAYMENT_BONUS_CREDITS = 120;
-export const DAILY_LOGIN_BONUS_CREDITS = 35;
-export const STREAK_BONUS_CREDITS = 15; // per day after day 1, capped in logic
+/** 100 min/month = 6000 credits */
+export const PRO_MONTHLY_CREDIT_GRANT = 100 * 60;
+
+/** MVP: zero automatic grants to protect ElevenLabs quota (adjust in env if needed). */
+export const FIRST_PAYMENT_BONUS_CREDITS = Number(process.env.FIRST_PAYMENT_BONUS_CREDITS ?? "0") || 0;
+export const DAILY_LOGIN_BONUS_CREDITS = 0;
+export const STREAK_BONUS_CREDITS = 0;
 export const INVITE_BONUS_CREDITS = 90;
 
 export const FREE_MAX_SCRIPT_CHARS = 420;
 export const PAID_MAX_SCRIPT_CHARS = 2500;
-
-const premiumVoiceSet = new Set(
-  (process.env.ELEVENLABS_PREMIUM_VOICE_IDS ?? "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean)
-);
 
 export type BillingUserRow = {
   telegram_id: number;
@@ -49,6 +47,7 @@ export type BillingUserRow = {
   first_paid_at: string | null;
   created_at?: string | null;
   first_generation_at: string | null;
+  total_generated_seconds?: number | null;
 };
 
 export function isProSubscriptionActive(row: Pick<BillingUserRow, "subscription_tier" | "subscription_expires_at">): boolean {
@@ -73,21 +72,21 @@ export function estimateSpeechSeconds(text: string, speed: number): number {
   return Math.ceil(rawSeconds / safeSpeed);
 }
 
-export function getVoiceCreditMultiplier(voiceId: string): number {
-  if (premiumVoiceSet.has(voiceId)) {
-    return 1.35;
-  }
-  return 1;
-}
-
-export function computeGenerationCredits(text: string, voiceId: string, speed: number): number {
+/** Credits == estimated seconds (min 5) — aligns with 1s ≈ 1 credit. */
+export function computeGenerationCredits(text: string, _voiceId: string, speed: number): number {
   const seconds = estimateSpeechSeconds(text, speed);
-  const mult = getVoiceCreditMultiplier(voiceId);
-  return Math.max(5, Math.ceil(seconds * mult * CREDITS_PER_UNIT_SECOND));
+  return Math.max(5, Math.ceil(seconds * CREDITS_PER_UNIT_SECOND));
 }
 
-export function contentFingerprint(text: string, voiceId: string): string {
-  const normalized = `${voiceId}|${text.trim().toLowerCase().replace(/\s+/g, " ")}`;
+export function contentFingerprint(
+  text: string,
+  voiceId: string,
+  speed: number,
+  pitch: number,
+  languageCode: string,
+  presetId: string | null
+): string {
+  const normalized = `${voiceId}|${presetId ?? ""}|${languageCode}|${speed}|${pitch}|${text.trim().toLowerCase().replace(/\s+/g, " ")}`;
   return crypto.createHash("sha256").update(normalized).digest("hex").slice(0, 32);
 }
 
@@ -191,6 +190,9 @@ export async function assertCanGenerate(params: {
   text: string;
   voiceId: string;
   speed: number;
+  pitch: number;
+  languageCode: string;
+  presetId: string | null;
 }): Promise<GenerationGateResult> {
   const rowRaw = await fetchBillingUser(params.telegramId);
   if (!rowRaw) {
@@ -204,37 +206,43 @@ export async function assertCanGenerate(params: {
     return {
       ok: false,
       code: "script_too_long",
-      message: `Text exceeds limit (${maxChars} characters) for your plan.`,
+      message: `Script is too long for your plan (${maxChars} characters max). Trim and try again.`,
       creditsRequired: 0
     };
   }
 
   const creditsRequired = computeGenerationCredits(params.text, params.voiceId, params.speed);
   const estimatedSeconds = estimateSpeechSeconds(params.text, params.speed);
-  const fp = contentFingerprint(params.text, params.voiceId);
+  const fp = contentFingerprint(
+    params.text,
+    params.voiceId,
+    params.speed,
+    params.pitch,
+    params.languageCode,
+    params.presetId
+  );
   const now = Date.now();
 
   const lastAt = row.last_generate_at ? new Date(row.last_generate_at).getTime() : 0;
-  const cooldown = isProSubscriptionActive(row) && row.subscription_tier !== "premium" ? COOLDOWN_MS_PRO : COOLDOWN_MS_FREE_AND_TOPUP;
+  const cooldown =
+    isProSubscriptionActive(row) && row.subscription_tier !== "premium" ? COOLDOWN_MS_PRO : COOLDOWN_MS_FREE_AND_TOPUP;
   if (lastAt && now - lastAt < cooldown) {
     const waitSec = Math.ceil((cooldown - (now - lastAt)) / 1000);
+    void logAnalyticsEvent(params.telegramId, "cooldown_blocked", { waitSec });
     return {
       ok: false,
       code: "cooldown",
-      message: `Please wait ${waitSec}s before another render.`,
+      message: `Give the studio a breath — ${waitSec}s before the next render.`,
       creditsRequired
     };
   }
 
-  if (
-    row.last_generate_fingerprint === fp &&
-    lastAt &&
-    now - lastAt < DUPLICATE_WINDOW_MS
-  ) {
+  if (row.last_generate_fingerprint === fp && lastAt && now - lastAt < DUPLICATE_WINDOW_MS) {
+    void logAnalyticsEvent(params.telegramId, "duplicate_request_blocked", {});
     return {
       ok: false,
       code: "duplicate",
-      message: "Same script was just generated. Change text or wait a moment.",
+      message: "You just created this voiceover. Tweak the script or settings, or wait a moment.",
       creditsRequired
     };
   }
@@ -246,22 +254,25 @@ export async function assertCanGenerate(params: {
   const freeTrack = usingFreeMvpTrack(row);
   if (freeTrack) {
     if ((row.daily_gen_count ?? 0) >= FREE_DAILY_REQUEST_CAP) {
+      void logAnalyticsEvent(params.telegramId, "free_limit_reached", { reason: "daily_cap" });
       return {
         ok: false,
         code: "daily_cap",
-        message: "Daily try limit reached. Top up to keep creating.",
+        message: "You've used today's preview tries. Top up for more studio time.",
         creditsRequired,
         creditsShortfall: creditsRequired
       };
     }
     const freeSeconds = row.free_seconds_used ?? 0;
     const freeGens = row.free_generation_count ?? 0;
-    const lifetimeExceeded = freeSeconds + estimatedSeconds > FREE_LIFETIME_SECONDS_CAP || freeGens >= FREE_MAX_GENERATIONS;
+    const lifetimeExceeded =
+      freeSeconds + estimatedSeconds > FREE_LIFETIME_SECONDS_CAP || freeGens >= FREE_MAX_GENERATIONS;
     if (lifetimeExceeded) {
+      void logAnalyticsEvent(params.telegramId, "free_limit_reached", { reason: "lifetime" });
       return {
         ok: false,
         code: "free_exhausted",
-        message: "Free studio time is used up. Grab credits to continue.",
+        message: "Beta preview time is fully used — unlock more narration whenever you're ready.",
         creditsRequired,
         secondsShortfall: Math.max(0, freeSeconds + estimatedSeconds - FREE_LIFETIME_SECONDS_CAP),
         creditsShortfall: creditsRequired
@@ -286,7 +297,7 @@ export async function assertCanGenerate(params: {
   return {
     ok: false,
     code: "insufficient_credits",
-    message: "Not enough credits for this voiceover.",
+    message: "Not enough studio time for this narration. Grab a top-up or Pro Beta.",
     creditsRequired,
     creditsShortfall: shortfall
   };
@@ -297,16 +308,28 @@ export async function chargeAfterSuccessfulGeneration(params: {
   text: string;
   voiceId: string;
   speed: number;
+  pitch: number;
+  languageCode: string;
+  presetId: string | null;
   source: "free" | "wallet" | "subscription";
   creditsRequired: number;
   estimatedSeconds: number;
 }): Promise<void> {
-  const fp = contentFingerprint(params.text, params.voiceId);
+  const fp = contentFingerprint(
+    params.text,
+    params.voiceId,
+    params.speed,
+    params.pitch,
+    params.languageCode,
+    params.presetId
+  );
   const nowIso = new Date().toISOString();
   const row = await fetchBillingUser(params.telegramId);
   if (!row) {
     return;
   }
+
+  const totalGen = (row.total_generated_seconds ?? 0) + params.estimatedSeconds;
 
   if ((row.subscription_tier ?? "").toLowerCase() === "premium") {
     await supabase
@@ -314,7 +337,8 @@ export async function chargeAfterSuccessfulGeneration(params: {
       .update({
         daily_gen_count: (row.daily_gen_count ?? 0) + 1,
         last_generate_at: nowIso,
-        last_generate_fingerprint: fp
+        last_generate_fingerprint: fp,
+        total_generated_seconds: totalGen
       })
       .eq("telegram_id", params.telegramId);
     return;
@@ -328,7 +352,8 @@ export async function chargeAfterSuccessfulGeneration(params: {
         free_generation_count: (row.free_generation_count ?? 0) + 1,
         daily_gen_count: (row.daily_gen_count ?? 0) + 1,
         last_generate_at: nowIso,
-        last_generate_fingerprint: fp
+        last_generate_fingerprint: fp,
+        total_generated_seconds: totalGen
       })
       .eq("telegram_id", params.telegramId);
     return;
@@ -349,11 +374,12 @@ export async function chargeAfterSuccessfulGeneration(params: {
   await supabase
     .from("users")
     .update({
-      subscription_credit_balance: subBal,
-      credit_balance: wallet,
+      subscription_credit_balance: Math.max(0, subBal),
+      credit_balance: Math.max(0, wallet),
       daily_gen_count: (row.daily_gen_count ?? 0) + 1,
       last_generate_at: nowIso,
-      last_generate_fingerprint: fp
+      last_generate_fingerprint: fp,
+      total_generated_seconds: totalGen
     })
     .eq("telegram_id", params.telegramId);
 }
@@ -376,7 +402,36 @@ export async function logAnalyticsEvent(
   }
 }
 
+export async function insertGenerationLog(params: {
+  telegramId: number;
+  textLength: number;
+  voiceId: string;
+  creditsRequired: number;
+  estimatedSeconds: number;
+  status: "completed" | "failed";
+  failureReason?: string | null;
+}): Promise<void> {
+  try {
+    await supabase.from("generation_logs").insert([
+      {
+        telegram_id: params.telegramId,
+        text_length: params.textLength,
+        voice_id: params.voiceId,
+        generation_duration_credits: params.creditsRequired,
+        estimated_seconds: params.estimatedSeconds,
+        status: params.status,
+        failure_reason: params.failureReason ?? null
+      }
+    ]);
+  } catch {
+    /* optional table */
+  }
+}
+
 export async function applyRetentionOnProfileOpen(telegramId: number): Promise<void> {
+  if (DAILY_LOGIN_BONUS_CREDITS <= 0 && STREAK_BONUS_CREDITS <= 0) {
+    return;
+  }
   const row = await fetchBillingUser(telegramId);
   if (!row) {
     return;
@@ -432,5 +487,5 @@ export async function markFirstGenerationIfNeeded(telegramId: number): Promise<v
     .from("users")
     .update({ first_generation_at: new Date().toISOString() })
     .eq("telegram_id", telegramId);
-  void logAnalyticsEvent(telegramId, "first_generation", {});
+  void logAnalyticsEvent(telegramId, "first_generation_completed", {});
 }

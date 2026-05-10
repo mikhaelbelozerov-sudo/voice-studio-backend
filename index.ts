@@ -12,6 +12,7 @@ import {
     fetchBillingUser,
     FIRST_PAYMENT_BONUS_CREDITS,
     INVITE_BONUS_CREDITS,
+    insertGenerationLog,
     logAnalyticsEvent,
     markFirstGenerationIfNeeded,
     PRO_MONTHLY_CREDIT_GRANT,
@@ -130,41 +131,32 @@ type ProductConfig = {
 };
 
 const PRODUCT_CATALOG: Record<string, ProductConfig> = {
-    credits_10m: {
-        catalogKey: "credits_10m",
+    credits_5m: {
+        catalogKey: "credits_5m",
         productType: "credits",
-        productValue: 10 * 60,
+        productValue: 5 * 60,
         amount: 39,
-        title: "VoiceStudio Pro — 10 min studio time",
-        description: "+10 minutes of narration credits (~600 credits). Creator-friendly top-up.",
-        label: "+10 min"
+        title: "VoiceStudio Pro — Starter (5 min)",
+        description: "+5 minutes of studio narration time — perfect for your next Short or Reel.",
+        label: "Starter 5m"
     },
-    credits_35m: {
-        catalogKey: "credits_35m",
+    credits_20m: {
+        catalogKey: "credits_20m",
         productType: "credits",
-        productValue: 35 * 60,
+        productValue: 20 * 60,
         amount: 99,
-        title: "VoiceStudio Pro — 35 min bundle",
-        description: "+35 minutes of narration credits (~2100 credits). Best for weekly content.",
-        label: "+35 min"
-    },
-    credits_120m: {
-        catalogKey: "credits_120m",
-        productType: "credits",
-        productValue: 120 * 60,
-        amount: 249,
-        title: "VoiceStudio Pro — 120 min booster",
-        description: "+120 minutes of narration credits (~7200 credits). Power batch for creators.",
-        label: "+120 min"
+        title: "VoiceStudio Pro — Creator (20 min)",
+        description: "+20 minutes of studio-quality voiceovers for a week of content.",
+        label: "Creator 20m"
     },
     pro_creator_30d: {
         catalogKey: "pro_creator_30d",
         productType: "subscription",
         productValue: 3,
         amount: Number(process.env.PRO_CREATOR_STARS_PRICE ?? "650"),
-        title: "Pro Creator · 30 days",
-        description: `${Math.floor(PRO_MONTHLY_CREDIT_GRANT / 60)} monthly narration minutes, faster queue & longer scripts.`,
-        label: "Pro Creator 30d"
+        title: "PRO Creator Beta · 30 days",
+        description: `${Math.floor(PRO_MONTHLY_CREDIT_GRANT / 60)} min/month, faster queue, longer scripts, history & priority.`,
+        label: "PRO Creator Beta"
     }
 };
 
@@ -609,10 +601,9 @@ if (!telegramBot) {
             await telegramBot.sendMessage(chatId, "Пополните студийные минуты звёздами или возьмите Pro Creator:", {
                 reply_markup: {
                     inline_keyboard: [
-                        [{ text: "+10 мин • 39⭐️", callback_data: "buy:credits_10m" }],
-                        [{ text: "+35 мин • 99⭐️", callback_data: "buy:credits_35m" }],
-                        [{ text: "+120 мин • 249⭐️", callback_data: "buy:credits_120m" }],
-                        [{ text: "Pro Creator • 30 дней", callback_data: "buy:pro_creator_30d" }]
+                        [{ text: "Starter 5 мин • 39⭐️", callback_data: "buy:credits_5m" }],
+                        [{ text: "Creator 20 мин • 99⭐️", callback_data: "buy:credits_20m" }],
+                        [{ text: "PRO Creator Beta • 30 дней", callback_data: "buy:pro_creator_30d" }]
                     ]
                 }
             });
@@ -774,6 +765,22 @@ if (!telegramBot) {
                     amount: payment.total_amount
                 }]);
 
+                try {
+                    await supabase.from("stars_transactions").insert([
+                        {
+                            telegram_id: telegramId,
+                            stars_payment_id: payment.telegram_payment_charge_id,
+                            credits_added:
+                                String(invoice.product_type) === "credits" || String(invoice.product_type) === "minutes"
+                                    ? Number(invoice.product_value)
+                                    : PRO_MONTHLY_CREDIT_GRANT,
+                            purchase_type: String(invoice.product_type)
+                        }
+                    ]);
+                } catch {
+                    /* stars_transactions table optional until migration */
+                }
+
                 const user = await getOrCreateUser(telegramId);
                 const productType = String(invoice.product_type);
                 const wasFirstPaidEver = !(user as { first_paid_at?: string | null }).first_paid_at;
@@ -794,7 +801,7 @@ if (!telegramBot) {
                             ...(wasFirstPaidEver ? { first_paid_at: new Date().toISOString() } : {})
                         })
                         .eq("telegram_id", telegramId);
-                    void logAnalyticsEvent(telegramId, "topup_paid", {
+                    void logAnalyticsEvent(telegramId, "topup_purchased", {
                         credits: creditsToAdd,
                         firstPaymentBonus: wasFirstPaidEver ? FIRST_PAYMENT_BONUS_CREDITS : 0
                     });
@@ -819,7 +826,7 @@ if (!telegramBot) {
                             ...(wasFirstPaidEver ? { first_paid_at: new Date().toISOString() } : {})
                         })
                         .eq("telegram_id", telegramId);
-                    void logAnalyticsEvent(telegramId, "subscription_purchased", { tier: "pro_creator" });
+                    void logAnalyticsEvent(telegramId, "subscription_purchased", { tier: "pro_creator_beta" });
                 }
 
                 await telegramBot.sendMessage(msg.chat.id, "Оплата прошла успешно! Доступ обновлён.");
@@ -1058,6 +1065,7 @@ app.post("/api/generate", async (req: Request, res: Response) => {
 
         const safeTelegramId = Number(telegramId);
         if (!tryBeginGeneration(safeTelegramId)) {
+            void logAnalyticsEvent(safeTelegramId, "queue_busy_blocked", {});
             return res.status(429).json({
                 error: "Another render is in progress. Wait a moment.",
                 code: "queue_busy"
@@ -1100,11 +1108,15 @@ app.post("/api/generate", async (req: Request, res: Response) => {
             languageCode: safeLanguageCode
         });
 
+        const presetKey = presetId && typeof presetId === "string" ? String(presetId) : null;
         const gate = await assertCanGenerate({
             telegramId: safeTelegramId,
             text: ttsText,
             voiceId: String(voiceId),
-            speed: safeSpeed
+            speed: safeSpeed,
+            pitch: safePitch,
+            languageCode: safeLanguageCode,
+            presetId: presetKey
         });
 
         if (!gate.ok) {
@@ -1114,10 +1126,17 @@ app.post("/api/generate", async (req: Request, res: Response) => {
                     : gate.code === "cooldown" || gate.code === "duplicate"
                       ? 429
                       : 402;
-            void logAnalyticsEvent(safeTelegramId, "generation_blocked", {
-                code: gate.code,
-                credits: gate.creditsRequired
-            });
+            const alreadyLogged =
+                gate.code === "cooldown" ||
+                gate.code === "duplicate" ||
+                gate.code === "daily_cap" ||
+                gate.code === "free_exhausted";
+            if (!alreadyLogged) {
+                void logAnalyticsEvent(safeTelegramId, "generation_blocked", {
+                    code: gate.code,
+                    credits: gate.creditsRequired
+                });
+            }
             endGeneration(safeTelegramId);
             activeQueueUser = null;
             return res.status(statusCode).json({
@@ -1126,6 +1145,13 @@ app.post("/api/generate", async (req: Request, res: Response) => {
                 creditsRequired: gate.creditsRequired,
                 creditsShortfall: gate.creditsShortfall ?? null,
                 secondsShortfall: gate.secondsShortfall ?? null
+            });
+        }
+
+        const billingSnap = await fetchBillingUser(safeTelegramId);
+        if (billingSnap && !billingSnap.first_generation_at) {
+            void logAnalyticsEvent(safeTelegramId, "first_generation_started", {
+                credits: gate.creditsRequired
             });
         }
 
@@ -1164,6 +1190,19 @@ app.post("/api/generate", async (req: Request, res: Response) => {
                 pitch: safePitch,
                 errorText
             });
+            void insertGenerationLog({
+                telegramId: safeTelegramId,
+                textLength: ttsText.length,
+                voiceId: String(voiceId),
+                creditsRequired: gate.creditsRequired,
+                estimatedSeconds: gate.estimatedSeconds,
+                status: "failed",
+                failureReason: `elevenlabs_${response.status}`
+            });
+            void logAnalyticsEvent(safeTelegramId, "generation_failed", {
+                phase: "tts",
+                status: response.status
+            });
             throw new Error(`ElevenLabs error (${response.status}): ${errorText}`);
         }
 
@@ -1190,6 +1229,9 @@ app.post("/api/generate", async (req: Request, res: Response) => {
             text: ttsText,
             voiceId: String(voiceId),
             speed: safeSpeed,
+            pitch: safePitch,
+            languageCode: safeLanguageCode,
+            presetId: presetKey,
             source: gate.source,
             creditsRequired: gate.creditsRequired,
             estimatedSeconds: gate.estimatedSeconds
@@ -1197,6 +1239,16 @@ app.post("/api/generate", async (req: Request, res: Response) => {
 
         await saveGenerationHistory(safeTelegramId, text, voiceId, audioUrl);
         await markFirstGenerationIfNeeded(safeTelegramId);
+
+        void insertGenerationLog({
+            telegramId: safeTelegramId,
+            textLength: ttsText.length,
+            voiceId: String(voiceId),
+            creditsRequired: gate.creditsRequired,
+            estimatedSeconds: gate.estimatedSeconds,
+            status: "completed",
+            failureReason: null
+        });
 
         void logAnalyticsEvent(safeTelegramId, "generation_completed", {
             creditsCharged: gate.creditsRequired,
@@ -1225,8 +1277,10 @@ app.post("/api/generate", async (req: Request, res: Response) => {
         if (!generationCommitted && activeQueueUser !== null) {
             endGeneration(activeQueueUser);
         }
-        void logAnalyticsEvent(Number(req.body.telegramId ?? 0) || 0, "generation_failed", {
-            message: err?.message ?? "unknown"
+        const failTg = Number(req.body.telegramId ?? 0) || 0;
+        void logAnalyticsEvent(failTg, "generation_failed", {
+            message: err?.message ?? "unknown",
+            phase: "unhandled"
         });
         res.status(500).json({ error: err.message });
     }
