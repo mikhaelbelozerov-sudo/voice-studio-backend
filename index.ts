@@ -155,7 +155,7 @@ const PRODUCT_CATALOG: Record<string, ProductConfig> = {
         productValue: 3,
         amount: Number(process.env.PRO_CREATOR_STARS_PRICE ?? "650"),
         title: "PRO Creator Beta · 30 days",
-        description: `${Math.floor(PRO_MONTHLY_CREDIT_GRANT / 60)} min/month, faster queue, longer scripts, history & priority.`,
+        description: `${Math.floor(PRO_MONTHLY_CREDIT_GRANT / 60)} min/month voiceover, priority queue, longer scripts.`,
         label: "PRO Creator Beta"
     }
 };
