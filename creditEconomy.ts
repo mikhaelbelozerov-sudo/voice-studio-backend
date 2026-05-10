@@ -22,8 +22,6 @@ export const PRO_MONTHLY_CREDIT_GRANT = 100 * 60;
 export const FIRST_PAYMENT_BONUS_CREDITS = Number(process.env.FIRST_PAYMENT_BONUS_CREDITS ?? "0") || 0;
 export const DAILY_LOGIN_BONUS_CREDITS = 0;
 export const STREAK_BONUS_CREDITS = 0;
-export const INVITE_BONUS_CREDITS = 90;
-
 export const FREE_MAX_SCRIPT_CHARS = 420;
 export const PAID_MAX_SCRIPT_CHARS = 2500;
 

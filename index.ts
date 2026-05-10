@@ -11,13 +11,20 @@ import {
     endGeneration,
     fetchBillingUser,
     FIRST_PAYMENT_BONUS_CREDITS,
-    INVITE_BONUS_CREDITS,
     insertGenerationLog,
     logAnalyticsEvent,
     markFirstGenerationIfNeeded,
     PRO_MONTHLY_CREDIT_GRANT,
     tryBeginGeneration
 } from "./creditEconomy";
+import {
+    claimReferralLink,
+    getReferralProfileSnapshot,
+    hashReferralIp,
+    processDueReferralRewards,
+    processReferralSideEffectsAfterDownload,
+    processReferralSideEffectsAfterGeneration
+} from "./referralProgram";
 
 import {
     cleanExpiredFiles,
@@ -1239,6 +1246,7 @@ app.post("/api/generate", async (req: Request, res: Response) => {
 
         await saveGenerationHistory(safeTelegramId, text, voiceId, audioUrl);
         await markFirstGenerationIfNeeded(safeTelegramId);
+        await processReferralSideEffectsAfterGeneration(safeTelegramId);
 
         void insertGenerationLog({
             telegramId: safeTelegramId,
@@ -1301,8 +1309,14 @@ app.post("/api/analytics/events", async (req: Request, res: Response) => {
 
 app.post("/api/referrals/claim", async (req: Request, res: Response) => {
     try {
-        const inviteeTelegramId = Number((req.body as { inviteeTelegramId?: unknown }).inviteeTelegramId);
-        const referrerTelegramId = Number((req.body as { referrerTelegramId?: unknown }).referrerTelegramId);
+        const body = req.body as {
+            inviteeTelegramId?: unknown;
+            referrerTelegramId?: unknown;
+            clientFingerprint?: unknown;
+        };
+        const inviteeTelegramId = Number(body.inviteeTelegramId);
+        const referrerTelegramId = Number(body.referrerTelegramId);
+        const clientFingerprint = typeof body.clientFingerprint === "string" ? body.clientFingerprint : "";
         if (
             !Number.isFinite(inviteeTelegramId) ||
             inviteeTelegramId <= 0 ||
@@ -1313,42 +1327,36 @@ app.post("/api/referrals/claim", async (req: Request, res: Response) => {
             return res.status(400).json({ error: "Invalid referral ids" });
         }
 
-        const { data: dup, error: dupError } = await supabase
-            .from("referrals")
-            .select("id")
-            .eq("invitee_telegram_id", inviteeTelegramId)
-            .maybeSingle();
+        await getOrCreateUser(inviteeTelegramId);
 
-        if (dupError && dupError.code !== "PGRST116") {
-            return res.status(500).json({ error: dupError.message });
-        }
-        if (dup) {
-            return res.json({ ok: true, alreadyClaimed: true });
-        }
+        const result = await claimReferralLink({
+            inviteeTelegramId,
+            referrerTelegramId,
+            deviceFingerprint: clientFingerprint,
+            ipHash: hashReferralIp(req)
+        });
 
-        const { error: insertError } = await supabase.from("referrals").insert([
-            {
-                referrer_telegram_id: referrerTelegramId,
-                invitee_telegram_id: inviteeTelegramId
-            }
-        ]);
-
-        if (insertError) {
-            return res.status(500).json({ error: insertError.message });
+        if (!result.ok) {
+            void logAnalyticsEvent(inviteeTelegramId, "referral_rejected", { code: result.code });
+            return res.status(400).json({ error: result.message, code: result.code });
         }
 
-        const inviter = await fetchBillingUser(referrerTelegramId);
-        if (inviter) {
-            await supabase
-                .from("users")
-                .update({ credit_balance: (inviter.credit_balance ?? 0) + INVITE_BONUS_CREDITS })
-                .eq("telegram_id", referrerTelegramId);
-        }
-
-        void logAnalyticsEvent(referrerTelegramId, "referral_claimed", { invitee: inviteeTelegramId });
-        return res.json({ ok: true, bonusCredits: INVITE_BONUS_CREDITS });
+        return res.json({ ok: true, alreadyClaimed: result.alreadyClaimed });
     } catch (err: any) {
         return res.status(500).json({ error: err.message ?? "Referral failed" });
+    }
+});
+
+app.post("/api/referrals/download-ack", async (req: Request, res: Response) => {
+    try {
+        const telegramId = Number((req.body as { telegramId?: unknown }).telegramId);
+        if (!Number.isFinite(telegramId) || telegramId <= 0) {
+            return res.status(400).json({ error: "Invalid telegramId" });
+        }
+        await processReferralSideEffectsAfterDownload(telegramId);
+        return res.sendStatus(204);
+    } catch (err: any) {
+        return res.status(500).json({ error: err.message ?? "download-ack failed" });
     }
 });
 
@@ -1422,8 +1430,10 @@ app.get("/api/user/profile", async (req: Request, res: Response) => {
         }
 
         await applyRetentionOnProfileOpen(telegramId);
+        await processDueReferralRewards(telegramId);
         const profile = await getUserProfile(telegramId);
-        return res.json(profile);
+        const referral = await getReferralProfileSnapshot(telegramId);
+        return res.json({ ...profile, referral });
     } catch (err: any) {
         console.error("Profile fetch error:", err);
         return res.status(500).json({ error: err.message ?? "Failed to fetch profile" });
