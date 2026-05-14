@@ -38,6 +38,7 @@ import {
     SUPABASE_AUDIO_BUCKET
 } from "./quotaService";
 import { supabase } from "./supabaseClient";
+import { telegramSavePreparedInviteShare } from "./telegramPreparedShare";
 
 dotenv.config();
 
@@ -1357,6 +1358,45 @@ app.post("/api/referrals/download-ack", async (req: Request, res: Response) => {
         return res.sendStatus(204);
     } catch (err: any) {
         return res.status(500).json({ error: err.message ?? "download-ack failed" });
+    }
+});
+
+/** Для Telegram.WebApp.shareMessage — превью ссылки в диалоге «Поделиться» (Bot API 8+). */
+app.post("/api/referrals/prepared-share", async (req: Request, res: Response) => {
+    try {
+        if (!TELEGRAM_BOT_TOKEN) {
+            return res.status(503).json({ error: "Telegram bot is not configured" });
+        }
+        const body = req.body as { telegramId?: unknown; messageText?: unknown; title?: unknown };
+        const telegramId = Number(body.telegramId);
+        const messageText = typeof body.messageText === "string" ? body.messageText.trim() : "";
+        const title = typeof body.title === "string" ? body.title.trim() : "";
+
+        if (!Number.isFinite(telegramId) || telegramId <= 0) {
+            return res.status(400).json({ error: "Invalid telegramId" });
+        }
+        if (messageText.length < 1 || messageText.length > 4096) {
+            return res.status(400).json({ error: "Invalid messageText length" });
+        }
+        const lower = messageText.toLowerCase();
+        if (!lower.includes("t.me/") && !lower.includes("telegram.me/")) {
+            return res.status(400).json({ error: "messageText must include a t.me or telegram.me link" });
+        }
+
+        const prepared = await telegramSavePreparedInviteShare({
+            botToken: TELEGRAM_BOT_TOKEN,
+            userId: telegramId,
+            messageText,
+            articleTitle: title || "Voice Studio"
+        });
+
+        return res.json({
+            preparedMessageId: prepared.id,
+            expirationDate: prepared.expiration_date
+        });
+    } catch (err: any) {
+        console.error("prepared-share:", err);
+        return res.status(500).json({ error: err.message ?? "prepared-share failed" });
     }
 });
 
