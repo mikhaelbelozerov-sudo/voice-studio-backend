@@ -251,16 +251,6 @@ export async function assertCanGenerate(params: {
 
   const freeTrack = usingFreeMvpTrack(row);
   if (freeTrack) {
-    if ((row.daily_gen_count ?? 0) >= FREE_DAILY_REQUEST_CAP) {
-      void logAnalyticsEvent(params.telegramId, "free_limit_reached", { reason: "daily_cap" });
-      return {
-        ok: false,
-        code: "daily_cap",
-        message: "You've used today's preview tries. Top up for more studio time.",
-        creditsRequired,
-        creditsShortfall: creditsRequired
-      };
-    }
     const freeSeconds = row.free_seconds_used ?? 0;
     const freeGens = row.free_generation_count ?? 0;
     const lifetimeExceeded =
@@ -348,7 +338,6 @@ export async function chargeAfterSuccessfulGeneration(params: {
       .update({
         free_seconds_used: (row.free_seconds_used ?? 0) + params.estimatedSeconds,
         free_generation_count: (row.free_generation_count ?? 0) + 1,
-        daily_gen_count: (row.daily_gen_count ?? 0) + 1,
         last_generate_at: nowIso,
         last_generate_fingerprint: fp,
         total_generated_seconds: totalGen

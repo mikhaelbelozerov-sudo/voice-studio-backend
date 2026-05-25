@@ -241,7 +241,6 @@ export async function getUserProfile(telegramId: number): Promise<UserProfile> {
   const subCredits = Number((user as unknown as { subscription_credit_balance?: number }).subscription_credit_balance ?? 0);
   const freeSecs = Number((user as unknown as { free_seconds_used?: number }).free_seconds_used ?? 0);
   const freeGens = Number((user as unknown as { free_generation_count?: number }).free_generation_count ?? 0);
-
   let dailyUsed = Number((user as unknown as { daily_gen_count?: number }).daily_gen_count ?? 0);
   const billingRow = await fetchBillingUser(telegramId);
   if (billingRow) {
