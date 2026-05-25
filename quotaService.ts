@@ -4,7 +4,9 @@ import path from 'path';
 import {
   FREE_DAILY_REQUEST_CAP,
   FREE_LIFETIME_SECONDS_CAP,
-  FREE_MAX_GENERATIONS
+  FREE_MAX_GENERATIONS,
+  fetchBillingUser,
+  maybeResetDailyCounters
 } from './creditEconomy';
 import { supabase, SUPABASE_URL } from './supabaseClient';
 
@@ -239,7 +241,13 @@ export async function getUserProfile(telegramId: number): Promise<UserProfile> {
   const subCredits = Number((user as unknown as { subscription_credit_balance?: number }).subscription_credit_balance ?? 0);
   const freeSecs = Number((user as unknown as { free_seconds_used?: number }).free_seconds_used ?? 0);
   const freeGens = Number((user as unknown as { free_generation_count?: number }).free_generation_count ?? 0);
-  const dailyUsed = Number((user as unknown as { daily_gen_count?: number }).daily_gen_count ?? 0);
+
+  let dailyUsed = Number((user as unknown as { daily_gen_count?: number }).daily_gen_count ?? 0);
+  const billingRow = await fetchBillingUser(telegramId);
+  if (billingRow) {
+    const afterDailyReset = await maybeResetDailyCounters(billingRow, telegramId);
+    dailyUsed = Number(afterDailyReset.daily_gen_count ?? 0);
+  }
 
   return {
     subscription_tier: user.subscription_tier ?? 'free',
