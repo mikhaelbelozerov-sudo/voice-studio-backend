@@ -152,7 +152,7 @@ const PRODUCT_CATALOG: Record<string, ProductConfig> = {
         catalogKey: "credits_20m",
         productType: "credits",
         productValue: 20 * 60,
-        amount: 199,
+        amount: 279,
         title: "VoiceStudio Pro — Creator (20 min)",
         description: "+20 minutes of studio-quality voiceovers for a week of content.",
         label: "Creator 20m"
@@ -610,7 +610,7 @@ if (!telegramBot) {
                 reply_markup: {
                     inline_keyboard: [
                         [{ text: "Starter 5 мин • 99⭐️", callback_data: "buy:credits_5m" }],
-                        [{ text: "Creator 20 мин • 199⭐️", callback_data: "buy:credits_20m" }],
+                        [{ text: "Creator 20 мин • 279⭐️", callback_data: "buy:credits_20m" }],
                         [{ text: "PRO Creator Beta • 30 дней", callback_data: "buy:pro_creator_30d" }]
                     ]
                 }
