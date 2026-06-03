@@ -143,7 +143,7 @@ const PRODUCT_CATALOG: Record<string, ProductConfig> = {
         catalogKey: "credits_5m",
         productType: "credits",
         productValue: 5 * 60,
-        amount: 39,
+        amount: 99,
         title: "VoiceStudio Pro — Starter (5 min)",
         description: "+5 minutes of studio narration time — perfect for your next Short or Reel.",
         label: "Starter 5m"
@@ -152,7 +152,7 @@ const PRODUCT_CATALOG: Record<string, ProductConfig> = {
         catalogKey: "credits_20m",
         productType: "credits",
         productValue: 20 * 60,
-        amount: 99,
+        amount: 199,
         title: "VoiceStudio Pro — Creator (20 min)",
         description: "+20 minutes of studio-quality voiceovers for a week of content.",
         label: "Creator 20m"
@@ -161,7 +161,7 @@ const PRODUCT_CATALOG: Record<string, ProductConfig> = {
         catalogKey: "pro_creator_30d",
         productType: "subscription",
         productValue: 3,
-        amount: Number(process.env.PRO_CREATOR_STARS_PRICE ?? "650"),
+        amount: Number(process.env.PRO_CREATOR_STARS_PRICE ?? "1199"),
         title: "PRO Creator Beta · 30 days",
         description: `${Math.floor(PRO_MONTHLY_CREDIT_GRANT / 60)} min/month voiceover, priority queue, longer scripts.`,
         label: "PRO Creator Beta"
@@ -609,8 +609,8 @@ if (!telegramBot) {
             await telegramBot.sendMessage(chatId, "Пополните студийные минуты звёздами или возьмите Pro Creator:", {
                 reply_markup: {
                     inline_keyboard: [
-                        [{ text: "Starter 5 мин • 39⭐️", callback_data: "buy:credits_5m" }],
-                        [{ text: "Creator 20 мин • 99⭐️", callback_data: "buy:credits_20m" }],
+                        [{ text: "Starter 5 мин • 99⭐️", callback_data: "buy:credits_5m" }],
+                        [{ text: "Creator 20 мин • 199⭐️", callback_data: "buy:credits_20m" }],
                         [{ text: "PRO Creator Beta • 30 дней", callback_data: "buy:pro_creator_30d" }]
                     ]
                 }
