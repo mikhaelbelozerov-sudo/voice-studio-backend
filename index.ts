@@ -1338,8 +1338,18 @@ app.post("/api/referrals/claim", async (req: Request, res: Response) => {
         });
 
         if (!result.ok) {
-            void logAnalyticsEvent(inviteeTelegramId, "referral_rejected", { code: result.code });
-            return res.status(400).json({ error: result.message, code: result.code });
+            void logAnalyticsEvent(inviteeTelegramId, "referral_rejected", {
+                code: result.code,
+                message: result.message,
+                dbCode: result.dbCode,
+                dbDetails: result.dbDetails
+            });
+            return res.status(400).json({
+                error: result.message,
+                code: result.code,
+                dbCode: result.dbCode,
+                dbDetails: result.dbDetails
+            });
         }
 
         return res.json({ ok: true, alreadyClaimed: result.alreadyClaimed });

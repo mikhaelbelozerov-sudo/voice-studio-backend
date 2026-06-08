@@ -137,7 +137,7 @@ export async function processDueReferralRewards(telegramId: number): Promise<voi
 
 export type ReferralClaimResult =
   | { ok: true; alreadyClaimed: boolean }
-  | { ok: false; code: string; message: string };
+  | { ok: false; code: string; message: string; dbCode?: string; dbDetails?: string };
 
 export async function claimReferralLink(params: {
   inviteeTelegramId: number;
@@ -216,7 +216,19 @@ export async function claimReferralLink(params: {
       void logAnalyticsEvent(inviteeTelegramId, "referral_rejected", { reason: "duplicate_device_db" });
       return { ok: false, code: "device_reuse", message: "Invite already used on this device." };
     }
-    return { ok: false, code: "insert_failed", message: insertError.message };
+    void logAnalyticsEvent(inviteeTelegramId, "referral_insert_failed", {
+      pgCode: insertError.code,
+      message: insertError.message,
+      details: insertError.details,
+      hint: insertError.hint
+    });
+    return {
+      ok: false,
+      code: "insert_failed",
+      message: insertError.message,
+      dbCode: insertError.code,
+      dbDetails: insertError.details ?? undefined
+    };
   }
 
   await supabase
