@@ -51,36 +51,7 @@ async function countInviterPaidThisMonth(referrerTelegramId: number): Promise<nu
 export async function processDueReferralRewards(telegramId: number): Promise<void> {
   const now = new Date().toISOString();
 
-  const { data: asInvitee } = await supabase
-    .from("referrals")
-    .select("*")
-    .eq("invitee_telegram_id", telegramId)
-    .not("invitee_bonus_due_at", "is", null)
-    .lte("invitee_bonus_due_at", now)
-    .is("invitee_bonus_paid_at", null)
-    .in("status", ["pending", "activated"])
-    .eq("legacy_row", false)
-    .eq("fraud_flag", false);
-
-  for (const row of asInvitee ?? []) {
-    const { data: user } = await supabase.from("users").select("credit_balance").eq("telegram_id", telegramId).single();
-    const bal = Number(user?.credit_balance ?? 0);
-    const { error: upErr } = await supabase
-      .from("users")
-      .update({ credit_balance: bal + REFERRAL_INVITEE_BONUS_CREDITS })
-      .eq("telegram_id", telegramId);
-    if (upErr) {
-      continue;
-    }
-    await supabase
-      .from("referrals")
-      .update({
-        invitee_bonus_paid_at: now,
-        status: "activated"
-      })
-      .eq("id", row.id);
-    void logAnalyticsEvent(telegramId, "referral_reward_granted", { role: "invitee", credits: REFERRAL_INVITEE_BONUS_CREDITS });
-  }
+  await processDueInviteeBonusOnly(telegramId, now);
 
   const { data: asReferrer } = await supabase
     .from("referrals")
@@ -124,7 +95,7 @@ export async function processDueReferralRewards(telegramId: number): Promise<voi
       .from("referrals")
       .update({
         referrer_bonus_paid_at: now,
-        status: "rewarded"
+        status: row.invitee_bonus_paid_at ? "rewarded" : "activated"
       })
       .eq("id", row.id);
     void logAnalyticsEvent(telegramId, "referral_reward_granted", {
@@ -133,6 +104,65 @@ export async function processDueReferralRewards(telegramId: number): Promise<voi
       invitee: row.invitee_telegram_id
     });
   }
+
+  /** Invitee may never reopen the app — pay their due bonus when referrer triggers this job. */
+  const { data: inviteesAwaitingPayout } = await supabase
+    .from("referrals")
+    .select("invitee_telegram_id")
+    .eq("referrer_telegram_id", telegramId)
+    .not("invitee_bonus_due_at", "is", null)
+    .lte("invitee_bonus_due_at", now)
+    .is("invitee_bonus_paid_at", null)
+    .eq("legacy_row", false)
+    .eq("fraud_flag", false)
+    .not("status", "eq", "rejected")
+    .not("status", "eq", "flagged");
+
+  for (const pending of inviteesAwaitingPayout ?? []) {
+    const inviteeId = Number(pending.invitee_telegram_id);
+    if (inviteeId === telegramId) {
+      continue;
+    }
+    await processDueInviteeBonusOnly(inviteeId, now);
+  }
+}
+
+/** Pay invitee bonus without re-entering full processDueReferralRewards (avoids recursion). */
+async function processDueInviteeBonusOnly(inviteeTelegramId: number, now: string): Promise<void> {
+  const { data: row } = await supabase
+    .from("referrals")
+    .select("*")
+    .eq("invitee_telegram_id", inviteeTelegramId)
+    .not("invitee_bonus_due_at", "is", null)
+    .lte("invitee_bonus_due_at", now)
+    .is("invitee_bonus_paid_at", null)
+    .eq("legacy_row", false)
+    .eq("fraud_flag", false)
+    .not("status", "eq", "rejected")
+    .not("status", "eq", "flagged")
+    .maybeSingle();
+
+  if (!row) {
+    return;
+  }
+
+  const { data: user } = await supabase.from("users").select("credit_balance").eq("telegram_id", inviteeTelegramId).single();
+  const bal = Number(user?.credit_balance ?? 0);
+  const { error: upErr } = await supabase
+    .from("users")
+    .update({ credit_balance: bal + REFERRAL_INVITEE_BONUS_CREDITS })
+    .eq("telegram_id", inviteeTelegramId);
+  if (upErr) {
+    return;
+  }
+  await supabase
+    .from("referrals")
+    .update({
+      invitee_bonus_paid_at: now,
+      status: row.referrer_bonus_paid_at ? "rewarded" : "activated"
+    })
+    .eq("id", row.id);
+  void logAnalyticsEvent(inviteeTelegramId, "referral_reward_granted", { role: "invitee", credits: REFERRAL_INVITEE_BONUS_CREDITS });
 }
 
 export type ReferralClaimResult =
