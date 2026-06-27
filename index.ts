@@ -71,6 +71,8 @@ const normalizeTelegramHttpsUrl = (raw: string): string => {
 };
 const MINI_APP_TELEGRAM_LINK = normalizeTelegramHttpsUrl(process.env.MINI_APP_TELEGRAM_LINK ?? "");
 const miniAppWebAppOpenUrl = MINI_APP_TELEGRAM_LINK || MINI_APP_URL;
+/** Код ответа для верификации владения ботом (каталоги вроде Apps Store). Задаётся платформой публикации. */
+const APPS_STORE_VERIFY_CODE = process.env.APPS_STORE_VERIFY_CODE?.trim() ?? "";
 const AUDIO_STORAGE_DIR = process.env.AUDIO_STORAGE_DIR?.trim() || process.env.RENDER_DISK_PATH?.trim() || path.join(__dirname, "temp");
 
 const SUPPORT_RATE_LIMIT_WINDOW_MS = 60_000;
@@ -602,6 +604,16 @@ if (!telegramBot) {
     registerVoiceStudioWebAppStart(telegramBot);
     if (!MINI_APP_URL) {
         console.warn("⚠️ Задайте MINI_APP_URL — иначе /start не покажет кнопку web_app.");
+    }
+    if (APPS_STORE_VERIFY_CODE) {
+        telegramBot.onText(/^\/appss_verify(?:@\w+)?(?:\s|$)/i, async (msg: TelegramBot.Message) => {
+            const chatId = msg.chat.id;
+            try {
+                await telegramBot.sendMessage(chatId, APPS_STORE_VERIFY_CODE);
+            } catch (error) {
+                console.error("Failed to send app store verify code:", error);
+            }
+        });
     }
     telegramBot.onText(/^\/buy/i, async (msg: TelegramBot.Message) => {
         const chatId = msg.chat.id;
